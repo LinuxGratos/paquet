@@ -15,40 +15,97 @@ use anyhow::{Context, Result, bail};
 use crate::signals;
 use crate::util::with_suffix;
 
-fn agent() -> &'static ureq::Agent {
+fn new_agent(keep_alive: bool) -> ureq::Agent {
+    let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
+    let mut config = ureq::Agent::config_builder()
+        .tls_config(tls)
+        .user_agent(concat!("paquet/", env!("CARGO_PKG_VERSION")))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)));
+    if !keep_alive {
+        config = config.max_idle_connections(0).max_idle_connections_per_host(0);
+    }
+    config.build().into()
+}
+
+/// Sends a GET or HEAD request. Connections are kept for the next requests;
+/// but an HTTP/1.0 server (`python3 -m http.server`...) may close one
+/// without saying so: a request failing on the network is sent once more,
+/// on a new connection.
+fn call(url: &str, head: bool) -> Result<ureq::http::Response<ureq::Body>> {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| {
-        let tls = ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
-        ureq::Agent::config_builder()
-            .tls_config(tls)
-            .user_agent(concat!("paquet/", env!("CARGO_PKG_VERSION")))
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .build()
-            .into()
-    })
+    static SINGLE_USE: OnceLock<ureq::Agent> = OnceLock::new();
+    let send = |agent: &ureq::Agent| if head { agent.head(url).call() } else { agent.get(url).call() };
+    let result = match send(AGENT.get_or_init(|| new_agent(true))) {
+        Err(ureq::Error::Io(_)) => send(SINGLE_USE.get_or_init(|| new_agent(false))),
+        other => other,
+    };
+    result.map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn check_scheme(url: &str) -> Result<()> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        bail!("unsupported URL {url} (expected http://, https:// or file://)");
+    }
+    Ok(())
+}
+
+/// Opens a URL for reading. Also returns its size, when known.
+pub fn open_sized(url: &str) -> Result<(Box<dyn Read>, Option<u64>)> {
+    if let Some(path) = file_url_path(url) {
+        let file = fs::File::open(&path).with_context(|| format!("unable to open {}", path.display()))?;
+        let size = file.metadata().ok().map(|m| m.len());
+        return Ok((Box::new(file), size));
+    }
+    check_scheme(url)?;
+    let response = call(url, false)?;
+    let size = content_length(response.headers());
+    Ok((Box::new(response.into_body().into_reader()), size))
 }
 
 /// Opens a URL for reading.
 pub fn open(url: &str) -> Result<Box<dyn Read>> {
+    Ok(open_sized(url)?.0)
+}
+
+fn content_length(headers: &ureq::http::HeaderMap) -> Option<u64> {
+    headers.get("content-length")?.to_str().ok()?.trim().parse().ok()
+}
+
+/// Size of the file behind a URL, without downloading it (an HTTP `HEAD`
+/// request). None when the server does not tell.
+pub fn size(url: &str) -> Result<Option<u64>> {
     if let Some(path) = file_url_path(url) {
-        let file = fs::File::open(&path).with_context(|| format!("unable to open {}", path.display()))?;
-        return Ok(Box::new(file));
+        let meta = fs::metadata(&path).with_context(|| format!("unable to open {}", path.display()))?;
+        return Ok(Some(meta.len()));
     }
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!("unsupported URL {url} (expected http://, https:// or file://)");
-    }
-    let response = agent().get(url).call().map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(Box::new(response.into_body().into_reader()))
+    check_scheme(url)?;
+    let response = call(url, true)?;
+    Ok(content_length(response.headers()))
 }
 
 /// Downloads a URL into a file. The data first goes to `<dest>.part`, which
 /// only replaces `dest` once complete.
 pub fn download(url: &str, dest: &Path) -> Result<()> {
+    download_with(url, dest, |_| {}, |_| Ok(signals::check()?))
+}
+
+/// Downloads a URL into a file, like [`download`], reporting its size (when
+/// known) to `on_size` once the transfer starts, then the size of each
+/// block received to `on_data` (0 before the first one), which can stop the
+/// transfer by failing.
+pub fn download_with(
+    url: &str,
+    dest: &Path,
+    on_size: impl FnOnce(Option<u64>),
+    mut on_data: impl FnMut(u64) -> Result<()>,
+) -> Result<()> {
     let part = with_suffix(dest, ".part");
     let result = (|| -> Result<()> {
-        let mut reader = open(url)?;
+        let (mut reader, size) = open_sized(url)?;
+        on_size(size);
         let mut file = fs::File::create(&part).with_context(|| format!("unable to create {}", part.display()))?;
-        copy_interruptible(&mut reader, &mut file)?;
+        copy_with(&mut reader, &mut file, &mut on_data)?;
         file.sync_all()?;
         Ok(())
     })();
@@ -63,15 +120,15 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
 pub fn download_bytes(url: &str) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     let mut reader = open(url)?;
-    copy_interruptible(&mut reader, &mut data)?;
+    copy_with(&mut reader, &mut data, &mut |_| Ok(signals::check()?))?;
     Ok(data)
 }
 
-fn copy_interruptible(reader: &mut dyn Read, writer: &mut dyn Write) -> Result<u64> {
+fn copy_with(reader: &mut dyn Read, writer: &mut dyn Write, on_data: &mut dyn FnMut(u64) -> Result<()>) -> Result<u64> {
     let mut buf = vec![0u8; 64 * 1024];
     let mut total = 0;
+    on_data(0)?;
     loop {
-        signals::check()?;
         let n = match reader.read(&mut buf) {
             Ok(0) => return Ok(total),
             Ok(n) => n,
@@ -79,6 +136,7 @@ fn copy_interruptible(reader: &mut dyn Read, writer: &mut dyn Write) -> Result<u
             Err(e) => return Err(e.into()),
         };
         writer.write_all(&buf[..n])?;
+        on_data(n as u64)?;
         total += n as u64;
     }
 }

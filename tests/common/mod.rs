@@ -192,3 +192,66 @@ impl Env {
         String::new()
     }
 }
+
+/// What a test HTTP server saw.
+#[derive(Default)]
+pub struct Served {
+    /// Requests, as "<method> <path>".
+    pub requests: std::sync::Mutex<Vec<String>>,
+    active: std::sync::atomic::AtomicUsize,
+    /// Most transfers in progress at the same time.
+    pub max_active: std::sync::atomic::AtomicUsize,
+}
+
+/// Serves the files of a directory over HTTP on 127.0.0.1, in the
+/// background, answering HEAD and GET (404 for missing files). Bodies are
+/// sent slowly, so that simultaneous downloads overlap. Returns the base URL.
+pub fn serve(dir: PathBuf) -> (String, std::sync::Arc<Served>) {
+    use std::io::{BufRead, BufReader};
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let served = std::sync::Arc::new(Served::default());
+    let stats = served.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let (dir, stats) = (dir.clone(), stats.clone());
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                if reader.read_line(&mut request).is_err() {
+                    return;
+                }
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let mut words = request.split_whitespace();
+                let (method, path) = (words.next().unwrap_or("").to_string(), words.next().unwrap_or("").to_string());
+                stats.requests.lock().unwrap().push(format!("{method} {path}"));
+                let Ok(body) = fs::read(dir.join(path.trim_start_matches('/'))) else {
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                };
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = stream.write_all(header.as_bytes());
+                if method == "GET" {
+                    let now = stats.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    stats.max_active.fetch_max(now, Ordering::SeqCst);
+                    for chunk in body.chunks(body.len().div_ceil(4).max(1)) {
+                        std::thread::sleep(std::time::Duration::from_millis(60));
+                        if stream.write_all(chunk).is_err() {
+                            break;
+                        }
+                    }
+                    stats.active.fetch_sub(1, Ordering::SeqCst);
+                }
+            });
+        }
+    });
+    (url, served)
+}

@@ -6,7 +6,7 @@ Gestionnaire de paquets de Great-OS, en Rust.
 paquet --sync          # récupère l'index du dépôt et vérifie sa signature
 paquet -s editeur      # cherche un paquet
 paquet -i nano         # l'installe, avec ses dépendances
-paquet -u              # met tout à jour
+paquet -u              # met tout à jour (affiche d'abord la taille à télécharger)
 paquet -r nano         # le supprime
 paquet autoremove      # supprime les dépendances devenues inutiles
 paquet -Q /usr/bin/nano  # dit à quel paquet appartient un fichier
@@ -80,6 +80,7 @@ paquet [OPTION] [--chroot <racine>]
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
   --noscripts                    ne lance ni scripts ni hooks
+  -y, --yes                      ne demande pas de confirmation (-u, autoremove, -C)
 ```
 
 États : `N` non installé, `I` installé explicitement, `A` installé
@@ -93,11 +94,17 @@ plus dans le dépôt.
 ```sh
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
+PARALLEL_DOWNLOADS=4      # facultatif : téléchargements simultanés (1 à 16)
 ```
 
 Les paquets sont pris dans `$MIRROR/$BRANCH/$(uname -m)/`. Les URL `http://`,
 `https://` et `file://` sont acceptées ; les variables de proxy habituelles
 (`https_proxy`, `no_proxy`...) sont respectées.
+
+`-i` et `-u` téléchargent toutes les archives nécessaires, plusieurs à la
+fois, avec une ligne de progression dans un terminal, avant de toucher au
+système : une archive manquante ou abîmée arrête la commande sans rien
+modifier.
 
 Les clés publiques de confiance sont dans `/etc/pq/keys/*.pub`. `--sync`
 refuse un index sans signature valide (sauf avec `--nosign`, déconseillé), et

@@ -18,6 +18,7 @@
 //! system; `PQ_CONFIG` and `PQ_KEYS_DIR` override their paths.
 
 pub mod cli;
+pub mod download;
 pub mod filelist;
 pub mod scripts;
 
@@ -113,6 +114,15 @@ pub struct Paquet {
     pub nosign: bool,
     /// `--noscripts`: package scripts and hooks are not run.
     pub noscripts: bool,
+    /// `-y`: questions are answered yes.
+    pub assume_yes: bool,
+    /// Simultaneous downloads (`PARALLEL_DOWNLOADS`).
+    pub jobs: usize,
+    /// Archives downloaded or found in the cache by this command, checked,
+    /// by file name.
+    prefetched: HashMap<String, PathBuf>,
+    /// Warnings already given, so planning and doing give them once.
+    warned: std::cell::RefCell<HashSet<String>>,
     /// Name the program was called with, for messages.
     pub prog: String,
     /// Paths installed or removed by the command, for the hooks.
@@ -145,6 +155,10 @@ impl Paquet {
             arch,
             nosign: false,
             noscripts: false,
+            assume_yes: false,
+            jobs: download::DEFAULT_JOBS,
+            prefetched: HashMap::new(),
+            warned: Default::default(),
             prog,
             touched: Vec::new(),
             script_failed: false,
@@ -342,7 +356,7 @@ impl Paquet {
         order: &mut Vec<String>,
     ) -> Result<()> {
         let pkg = dep_name(entry);
-        if entry != pkg {
+        if entry != pkg && self.warned.borrow_mut().insert(format!("{required_by} {entry}")) {
             println!("Warning: version constraint '{entry}' of {required_by} is not enforced yet.");
         }
         if resolved.contains(pkg) || visiting.contains(pkg) {
@@ -451,6 +465,9 @@ impl Paquet {
     /// checksum. A cached archive with the right checksum is used as is.
     fn fetch_archive(&self, record: &Record) -> Result<PathBuf> {
         let file = record.archive_name();
+        if let Some(path) = self.prefetched.get(&file) {
+            return Ok(path.clone());
+        }
         let dest = self.paths.cache_dir.join(&file);
         if record.checksum.is_empty() {
             bail!("no checksum for {file} in the repository index.");
@@ -459,8 +476,7 @@ impl Paquet {
             println!("Using cached {file}");
             return Ok(dest);
         }
-        let rel = if record.folder.is_empty() { file.clone() } else { format!("{}/{file}", record.folder) };
-        let url = self.mirror_url(&rel)?;
+        let url = self.archive_url(record)?;
         fs::create_dir_all(&self.paths.cache_dir)
             .with_context(|| format!("unable to create {}", self.paths.cache_dir.display()))?;
         let new = with_suffix(&dest, ".new");
@@ -472,6 +488,80 @@ impl Paquet {
         }
         fs::rename(&new, &dest)?;
         Ok(dest)
+    }
+
+    fn archive_url(&self, record: &Record) -> Result<String> {
+        let file = record.archive_name();
+        self.mirror_url(&if record.folder.is_empty() { file } else { format!("{}/{file}", record.folder) })
+    }
+
+    /// Archives needed to install or upgrade some packages. Those already
+    /// in the cache, with the right checksum, are kept for the command; the
+    /// others are returned, with their size when the mirror tells it. Also
+    /// returns how many archives come from the cache.
+    fn plan_downloads(&mut self, names: &[String]) -> Result<(Vec<download::Item>, usize)> {
+        let mut wanted: Vec<(Record, String)> = Vec::new();
+        for name in names {
+            let Some(record) = self.repo.get(name).cloned() else {
+                bail!("Package {name} not found in the repository.");
+            };
+            let file = record.archive_name();
+            if record.checksum.is_empty() {
+                bail!("no checksum for {file} in the repository index.");
+            }
+            if self.prefetched.contains_key(&file) || wanted.iter().any(|(r, _)| r.archive_name() == file) {
+                continue;
+            }
+            let url = self.archive_url(&record)?;
+            wanted.push((record, url));
+        }
+        let cache = self.paths.cache_dir.clone();
+        fs::create_dir_all(&cache).with_context(|| format!("unable to create {}", cache.display()))?;
+        // Leftovers of interrupted downloads
+        for part in util::files_with_suffix(&cache, ".part") {
+            let _ = fs::remove_file(part);
+        }
+        let checked = download::parallel_map(&wanted, self.jobs, |(record, url)| {
+            let dest = cache.join(record.archive_name());
+            let cached = dest.is_file() && sha256_file(&dest).ok().as_deref() == Some(record.checksum.as_str());
+            (!cached).then(|| fetch::size(url).ok().flatten())
+        });
+        let mut items = Vec::new();
+        let mut cached = 0;
+        for ((record, url), size) in wanted.into_iter().zip(checked) {
+            let dest = cache.join(record.archive_name());
+            match size {
+                None => {
+                    self.prefetched.insert(record.archive_name(), dest);
+                    cached += 1;
+                }
+                Some(size) => items.push(download::Item {
+                    label: format!("{} {}-{}", record.name, record.version, record.release),
+                    url,
+                    dest,
+                    checksum: record.checksum.clone(),
+                    size,
+                }),
+            }
+        }
+        Ok((items, cached))
+    }
+
+    /// Downloads planned archives, several at a time.
+    fn fetch_planned(&mut self, items: &[download::Item]) -> Result<()> {
+        download::download_all(items, self.jobs)?;
+        for item in items {
+            let file = item.dest.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            self.prefetched.insert(file, item.dest.clone());
+        }
+        Ok(())
+    }
+
+    /// Gets the archives of some packages into the cache before anything is
+    /// installed: a missing or damaged archive stops the command first.
+    fn download_archives(&mut self, names: &[String]) -> Result<()> {
+        let (items, _) = self.plan_downloads(names)?;
+        self.fetch_planned(&items)
     }
 
     /// Test hook: simulates a crash (kill -9), a Ctrl-C or a failure (such
@@ -766,6 +856,7 @@ impl Paquet {
         if order.len() > 1 {
             println!("Installing {target} and its dependencies: {}", order.join(" "));
         }
+        self.download_archives(&order)?;
         for pkg in &order {
             let reason = if pkg == target { "I" } else { "A" };
             self.install_package(pkg, reason).with_context(|| format!("installation of {target} stopped at {pkg}."))?;
@@ -853,6 +944,9 @@ impl Paquet {
 
         let deps: Vec<&str> = record.deps().collect();
         let order = self.resolve_install(name, &deps)?;
+        let mut needed = order.clone();
+        needed.push(name.to_string());
+        self.download_archives(&needed)?;
         for pkg in &order {
             self.install_package(pkg, "A")
                 .with_context(|| format!("upgrade of {name} stopped at dependency {pkg}."))?;
@@ -916,13 +1010,42 @@ impl Paquet {
         }
         let order = self.upgrade_order(&candidates);
         println!("Packages available for upgrade (in upgrade order):");
+        let width = order.iter().map(String::len).max().unwrap_or(0);
+        let version = |r: Option<&Record>| r.map(|r| format!("{}-{}", r.version, r.release)).unwrap_or_default();
         for pkg in &order {
-            println!("{pkg}");
+            println!("  {pkg:<width$}  {} -> {}", version(self.state.get(pkg)), version(self.repo.get(pkg)));
         }
-        if !util::ask("Do you want to upgrade these packages? [Y/n]", true) {
+        // Dependencies the new versions add (a package whose dependencies
+        // cannot be resolved fails on its own later)
+        let mut new_deps: Vec<String> = Vec::new();
+        for pkg in &order {
+            let deps: Vec<String> =
+                self.repo.get(pkg).map(|r| r.deps().map(String::from).collect()).unwrap_or_default();
+            let deps: Vec<&str> = deps.iter().map(String::as_str).collect();
+            for dep in self.resolve_install(pkg, &deps).unwrap_or_default() {
+                if !order.contains(&dep) && !new_deps.contains(&dep) {
+                    new_deps.push(dep);
+                }
+            }
+        }
+        if !new_deps.is_empty() {
+            println!("New dependencies to install: {}", new_deps.join(" "));
+        }
+        let all: Vec<String> = order.iter().chain(&new_deps).cloned().collect();
+        let all: Vec<String> = all.into_iter().filter(|p| self.repo.get(p).is_some()).collect();
+        let (items, cached) = self.plan_downloads(&all)?;
+        let (known, unknown) = download::total_size(&items);
+        let in_cache = match (cached, items.is_empty()) {
+            (0, _) => String::new(),
+            (_, true) => " (all archives are in the cache)".to_string(),
+            (n, false) => format!(" ({} already in the cache)", download::plural(n, "archive")),
+        };
+        println!("Download size: {}{in_cache}", download::describe_total(known, unknown));
+        if !self.assume_yes && !util::ask("Do you want to upgrade these packages? [Y/n]", true) {
             println!("Upgrade cancelled.");
             return Ok(());
         }
+        self.fetch_planned(&items)?;
         println!("Upgrading all packages with status 'U'...");
         let mut failed = false;
         for pkg in &order {
@@ -1027,7 +1150,7 @@ impl Paquet {
         for pkg in &orphans {
             println!("{pkg}");
         }
-        if !util::ask("Do you want to remove these packages? [Y/n]", true) {
+        if !self.assume_yes && !util::ask("Do you want to remove these packages? [Y/n]", true) {
             println!("Autoremove cancelled.");
             return Ok(());
         }
@@ -1348,7 +1471,7 @@ impl Paquet {
             size += dir_usage(entry);
         }
         println!("Cache size: {}", util::human_size(size));
-        if !util::ask("Do you want to clear the cache? (y/N):", false) {
+        if !self.assume_yes && !util::ask("Do you want to clear the cache? (y/N):", false) {
             println!("Cache not cleared.");
             return;
         }

@@ -38,6 +38,7 @@ pub fn display_help(prog: &str, keys_dir: &std::path::Path) {
     println!("                               (its database lives in <path>/var/lib/pq)");
     println!("  --noscripts                  Run neither the package scripts nor the hooks");
     println!("                               (with -i, -r, -u, autoremove)");
+    println!("  -y, --yes                    Do not ask for confirmation (-u, autoremove, -C)");
     println!();
     println!("Trusted signing keys: {}/*.pub", keys_dir.display());
     println!();
@@ -54,16 +55,18 @@ pub fn main() -> i32 {
 }
 
 fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
-    // --chroot, --nosign and --noscripts may appear anywhere
+    // --chroot, --nosign, --noscripts and -y may appear anywhere
     let mut chroot: Option<PathBuf> = None;
     let mut nosign = false;
     let mut noscripts = false;
+    let mut yes = false;
     let mut args = Vec::new();
     let mut iter = raw_args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--nosign" => nosign = true,
             "--noscripts" => noscripts = true,
+            "-y" | "--yes" => yes = true,
             "--chroot" => match iter.next() {
                 Some(dir) if !dir.is_empty() && !dir.starts_with('-') => chroot = Some(dir.into()),
                 _ => bail!("--chroot requires a path argument."),
@@ -93,15 +96,40 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     {
         bail!("--noscripts only applies to -i, -r, -u and autoremove.");
     }
+    if yes
+        && !matches!(
+            command,
+            "-i" | "--install"
+                | "-r"
+                | "--remove"
+                | "-u"
+                | "--upgrade"
+                | "autoremove"
+                | "--autoremove"
+                | "-C"
+                | "--cache"
+        )
+    {
+        bail!("-y only applies to -i, -r, -u, autoremove and -C.");
+    }
 
     if !paths.config_file.is_file() {
         bail!("Configuration file {} not found!", paths.config_file.display());
     }
     let (mut mirror, mut branch) = (String::new(), String::new());
+    let mut jobs = super::download::DEFAULT_JOBS;
     for (key, value) in config::read(&paths.config_file)? {
         match key.as_str() {
             "MIRROR" => mirror = value,
             "BRANCH" => branch = value,
+            "PARALLEL_DOWNLOADS" => match value.parse::<usize>() {
+                Ok(n) if (1..=super::download::MAX_JOBS).contains(&n) => jobs = n,
+                _ => eprintln!(
+                    "Warning: PARALLEL_DOWNLOADS must be between 1 and {} in {}; using {jobs}",
+                    super::download::MAX_JOBS,
+                    paths.config_file.display()
+                ),
+            },
             _ => eprintln!("Warning: ignoring unknown setting {key} in {}", paths.config_file.display()),
         }
     }
@@ -111,6 +139,8 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     let mut pq = Paquet::new(paths, mirror, branch, util::machine_arch(), prog.to_string());
     pq.nosign = nosign;
     pq.noscripts = noscripts;
+    pq.assume_yes = yes;
+    pq.jobs = jobs;
 
     // Package names end up in paths: reject anything unsafe early
     if matches!(

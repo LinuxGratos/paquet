@@ -16,12 +16,14 @@ lancées en root. Les autres (`-l`, `-s`, `-o`, `-Q`, `-I`, `-F`,
 ```sh
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
+PARALLEL_DOWNLOADS=4
 ```
 
 | Réglage | Rôle | Par défaut |
 |---|---|---|
 | `MIRROR` | adresse du miroir : `https://`, `http://` ou `file://` | (obligatoire) |
 | `BRANCH` | branche suivie (`stable`, `testing`...) | `stable` |
+| `PARALLEL_DOWNLOADS` | nombre de téléchargements simultanés (1 à 16) | `4` |
 
 Les paquets sont cherchés dans `$MIRROR/$BRANCH/<architecture>/`, où
 l'architecture est celle de `uname -m` (`x86_64`, `aarch64`...). Avec la
@@ -90,6 +92,10 @@ ligne par paquet.
 ```console
 # paquet -i salut
 Installing salut and its dependencies: libsalut salut
+Downloading 2 packages (1.3 MiB):
+  ✓ salut 0.3-2       96.4 KiB
+  ✓ libsalut 1.2-1     1.2 MiB
+  1.3 MiB downloaded in 0.8 s, 1.6 MiB/s
 Installing package: libsalut
 Extracting package files...
 libsalut installed successfully!
@@ -98,8 +104,10 @@ Extracting package files...
 salut installed successfully!
 ```
 
-Les dépendances manquantes sont installées d'abord. Chaque archive est
-vérifiée (somme SHA-256 de l'index signé) avant d'être déballée.
+Les dépendances manquantes sont installées d'abord. Toutes les archives sont
+téléchargées avant que le système ne soit touché (voir
+[Les téléchargements](#les-téléchargements)), et chacune est vérifiée (somme
+SHA-256 de l'index signé).
 
 L'installation est refusée si elle écraserait un fichier qui existe déjà
 (fichier d'un autre paquet, ou créé à la main) ; la liste des fichiers en
@@ -112,15 +120,64 @@ cause est affichée et rien n'est modifié. Seule exception, les fichiers de
 # paquet --sync
 # paquet -u
 Packages available for upgrade (in upgrade order):
-salut
+  libsalut  1.2-1 -> 1.3-1
+  salut     0.3-2 -> 0.4-1
+New dependencies to install: libbonjour
+Download size: 1.6 MiB (1 archive already in the cache)
 Do you want to upgrade these packages? [Y/n]
 ```
 
 `paquet -u` met à jour tous les paquets marqués `U` (une nouvelle version est
-dans l'index), les dépendances d'abord, après confirmation. `paquet -u nano`
-ne met à jour que `nano`. Les nouvelles dépendances d'une nouvelle version
-sont installées automatiquement ; les fichiers que la nouvelle version ne
-fournit plus sont supprimés.
+dans l'index), les dépendances d'abord, après confirmation. Avant la
+question, il affiche les versions, les nouvelles dépendances et la taille
+totale à télécharger. `paquet -u -y` ne pose pas la question (pour un script
+ou une tâche planifiée).
+
+`paquet -u nano` ne met à jour que `nano`, sans confirmation. Les nouvelles
+dépendances d'une nouvelle version sont installées automatiquement ; les
+fichiers que la nouvelle version ne fournit plus sont supprimés.
+
+### Les téléchargements
+
+`paquet -i` et `paquet -u` téléchargent d'abord toutes les archives
+nécessaires, plusieurs à la fois (`PARALLEL_DOWNLOADS`, 4 par défaut), puis
+seulement installent. Une archive manquante sur le miroir, ou dont la somme
+ne correspond pas à l'index, arrête donc la commande avant toute
+modification du système :
+
+```console
+# paquet -u -y
+...
+Downloading 2 packages (1.2 MiB + 1 of unknown size):
+  ✓ libsalut 1.3-1     1.2 MiB
+  ✗ salut 0.4-1         failed
+Error: failed to download https://miroir.exemple.org/great-os/stable/x86_64/extra/salut-0.4-1.tar.zst: http status: 404
+Error: 1 download of 2 failed; nothing was changed.
+```
+
+Les archives bien arrivées restent dans le cache : la commande suivante ne
+télécharge que ce qui manque. Un transfert interrompu par le réseau est
+retenté une fois.
+
+Dans un terminal, une ligne de progression sous la liste des archives
+terminées donne l'avancement, la quantité reçue et le débit ; elle disparaît
+à la fin :
+
+```text
+Downloading 5 packages (30.5 MiB):
+  ✓ beta 1.0-1        5.9 MiB
+  ✓ epsilon 1.0-1     6.5 MiB
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────   72%   22.0 MiB / 30.5 MiB   19.9 MiB/s
+```
+
+Hors terminal (redirection vers un fichier, tâche planifiée), seules les
+lignes des archives terminées sont écrites. Sans locale UTF-8, la barre est
+faite de `#` et de `-`, sans les symboles ✓ et ✗ ; la variable `NO_COLOR`
+supprime les couleurs.
+
+La taille annoncée vient du miroir (requête HTTP `HEAD`) : si le serveur ne
+la donne pas, elle est signalée comme inconnue (`+ 1 of unknown size`) et la
+barre n'affiche que la quantité reçue.
 
 ### Supprimer
 
@@ -146,7 +203,7 @@ non.
 
 ```sh
 paquet -o              # liste les orphelins
-paquet autoremove      # les supprime, après confirmation
+paquet autoremove      # les supprime, après confirmation (-y : sans)
 ```
 
 Pour garder un paquet installé comme dépendance, ou au contraire le laisser
@@ -331,6 +388,7 @@ paquet [OPTION] [--chroot <racine>]
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
   --noscripts                    ne lance ni scripts ni hooks (avec -i, -r, -u, autoremove)
+  -y, --yes                      ne demande pas de confirmation (-u, autoremove, -C)
   -h, --help                     affiche l'aide
 ```
 
@@ -340,7 +398,7 @@ le miroir ou le trafic réseau peut faire installer ce qu'il veut.
 
 | Fichier | Contenu |
 |---|---|
-| `/etc/pq.conf` | `MIRROR` et `BRANCH` (variable `PQ_CONFIG` pour un autre chemin) |
+| `/etc/pq.conf` | `MIRROR`, `BRANCH` et `PARALLEL_DOWNLOADS` (variable `PQ_CONFIG` pour un autre chemin) |
 | `/etc/pq/keys/*.pub` | clés publiques de confiance (variable `PQ_KEYS_DIR`) |
 | `/var/lib/pq/PQREPO` | index du dépôt, tel que récupéré |
 | `/var/lib/pq/PQREPOSTATE` | état de chaque paquet connu |
