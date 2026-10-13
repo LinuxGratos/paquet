@@ -19,6 +19,18 @@ paquet autoremove      # supprime les dépendances devenues inutiles
 | `genpqrepo` | Génère l'index `PQREPO` d'un miroir à partir des archives, et le signe. |
 | `pqmake` | Construit les paquets à partir de leurs recettes (`Pkgfile`), dépendances d'abord. |
 
+## Documentation
+
+- [Utilisation de paquet](docs/utilisation.md) : configurer le dépôt, installer, mettre à jour, supprimer, réparer.
+- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, construire, construire en chroot.
+- [Générer et publier un dépôt](docs/depot.md) : organisation du miroir, index `PQREPO`, publication.
+- [Signer un dépôt](docs/signature.md) : clés, signature, installation des clés, rotation.
+
+Le [parcours complet](docs/README.md#le-parcours-complet), de la recette au
+système installé, tient en dix commandes.
+
+## Compatibilité
+
 C'est la reprise des scripts `paquet.sh`, `genpqrepo.sh` et `pqmake.sh`. Les
 formats sont les mêmes (index, état local, listes de fichiers, journaux de
 transaction, clés et signatures, archives) : un système, un miroir ou un
