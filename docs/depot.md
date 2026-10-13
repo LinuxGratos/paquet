@@ -37,8 +37,11 @@ exemple `/srv/great-os/stable/x86_64`.
 ## Les archives
 
 Une archive s'appelle `<nom>-<version>-<release>.tar.zst` : une archive tar
-compressée avec zstd, qui contient les fichiers du paquet relativement à `/`
-et un fichier `.META` à la racine :
+compressée avec zstd, qui contient les fichiers du paquet relativement à `/`,
+un fichier `.META` à la racine et, facultativement, les scripts du paquet
+(`.PRE-INSTALL`, `.POST-INSTALL`, `.PRE-REMOVE`, `.POST-REMOVE`, voir
+[Scripts et hooks](scripts.md)). Ces fichiers à la racine ne sont jamais
+déballés dans le système. Le `.META` ressemble à :
 
 ```text
 Description: Dit bonjour
@@ -147,8 +150,9 @@ genpqrepo --genkey <nom>
 ## Publier
 
 Le miroir est un arbre de fichiers statiques : n'importe quel serveur web
-convient (nginx, Apache, un hébergement de fichiers...). Seuls `GET` et les
-codes HTTP standard sont utilisés.
+convient (nginx, Apache, un hébergement de fichiers...). Seuls `GET`,
+`HEAD` (pour annoncer la taille des téléchargements, facultatif) et les codes
+HTTP standard sont utilisés.
 
 Pour mettre à jour un miroir distant, envoyez d'abord les archives, puis
 l'index et sa signature ensemble, en dernier :

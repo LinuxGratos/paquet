@@ -107,7 +107,11 @@ fn install_upgrade_remove() {
 
     let r = env.pq_env(&["-u"], Some("\n"), &[]);
     assert!(r.ok(), "{}", r.all());
-    assert!(r.stdout.contains("Packages available for upgrade (in upgrade order):\nlibedit\n"));
+    assert!(
+        r.stdout.contains("Packages available for upgrade (in upgrade order):\n  libedit  1.0-1 -> 1.1-1\n"),
+        "{}",
+        r.stdout
+    );
     assert!(r.stdout.contains("Keeping existing"), "{}", r.stdout);
     assert_eq!(env.status("libedit"), "A");
     assert!(!env.rootpath("usr/lib/libedit.so.1").exists());
@@ -289,4 +293,75 @@ fn genpqrepo_index() {
     let r = env.cmd("genpqrepo", &[], None);
     assert_eq!(r.status, 1);
     assert!(r.stdout.contains("Usage:"));
+}
+
+#[test]
+fn parallel_downloads_over_http() {
+    let (env, key) = signed_mirror();
+    for n in 1..=4 {
+        env.package("base", &format!("lib{n}"), "1.0", &[(&format!("usr/lib/lib{n}.so"), "library")], "");
+    }
+    env.package("base", "app", "1.0", &[("usr/bin/app", "app")], "lib1 lib2 lib3 lib4");
+    env.index(Some(&key));
+    let (url, served) = common::serve(env.path("mirror"));
+    fs::write(env.path("pq.conf"), format!("MIRROR={url}\nBRANCH=stable\nPARALLEL_DOWNLOADS=3\n")).unwrap();
+    let no_proxy = [("NO_PROXY", "127.0.0.1,localhost"), ("no_proxy", "127.0.0.1,localhost")];
+    assert!(env.pq_env(&["-S"], None, &no_proxy).ok());
+
+    let r = env.pq_env(&["-i", "app"], None, &no_proxy);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("Downloading 5 packages ("), "{}", r.stdout);
+    for n in 1..=4 {
+        assert!(r.stdout.contains(&format!("\n  lib{n} 1.0-1  ")), "{}", r.stdout);
+    }
+    assert!(r.stdout.contains(" downloaded in "), "{}", r.stdout);
+    // Everything is downloaded before anything is installed
+    let downloaded = r.stdout.find(" downloaded in ").unwrap();
+    assert!(r.stdout.find("Installing package").unwrap() > downloaded, "{}", r.stdout);
+    assert_eq!(env.status("app"), "I");
+    let max = served.max_active.load(std::sync::atomic::Ordering::SeqCst);
+    assert!((2..=3).contains(&max), "{max} simultaneous downloads");
+    let requests = served.requests.lock().unwrap().clone();
+    assert_eq!(requests.iter().filter(|r| r.starts_with("HEAD ")).count(), 5, "{requests:?}");
+
+    // An upgrade shows the download size before asking
+    env.package("base", "lib1", "1.1", &[("usr/lib/lib1.so", "library v2")], "");
+    env.package("base", "lib2", "1.1", &[("usr/lib/lib2.so", "library v2")], "");
+    env.index(Some(&key));
+    assert!(env.pq_env(&["-S"], None, &no_proxy).ok());
+    let size: u64 = ["lib1-1.1-1", "lib2-1.1-1"]
+        .iter()
+        .map(|a| fs::metadata(env.repo_dir().join(format!("base/{a}.tar.zst"))).unwrap().len())
+        .sum();
+    let r = env.pq_env(&["-u"], Some("n\n"), &no_proxy);
+    assert!(r.stdout.contains("  lib1  1.0-1 -> 1.1-1\n  lib2  1.0-1 -> 1.1-1\n"), "{}", r.stdout);
+    let expected = format!("Download size: {}\n", paquet::paquet::download::size_label(size));
+    assert!(r.stdout.contains(&expected), "{}", r.stdout);
+    assert!(r.stdout.contains("Upgrade cancelled."), "{}", r.stdout);
+    assert!(!r.stdout.contains("Downloading"), "nothing downloaded: {}", r.stdout);
+
+    // A missing archive stops the upgrade before anything changes; the
+    // other archive stays in the cache
+    fs::remove_file(env.repo_dir().join("base/lib2-1.1-1.tar.zst")).unwrap();
+    let r = env.pq_env(&["-u", "-y"], None, &no_proxy);
+    assert!(!r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("+ 1 of unknown size"), "{}", r.stdout);
+    assert!(r.stdout.contains("  lib2 1.1-1      failed"), "{}", r.stdout);
+    assert!(r.stderr.contains("404"), "{}", r.stderr);
+    assert!(r.stderr.contains("1 download of 2 failed; nothing was changed."), "{}", r.stderr);
+    assert_eq!(fs::read_to_string(env.rootpath("usr/lib/lib1.so")).unwrap(), "library");
+    assert!(env.rootpath("var/lib/pq/cache/lib1-1.1-1.tar.zst").is_file());
+
+    // Once the mirror is fixed, only the missing archive is downloaded
+    env.package("base", "lib2", "1.1", &[("usr/lib/lib2.so", "library v2")], "");
+    env.index(Some(&key));
+    assert!(env.pq_env(&["-S"], None, &no_proxy).ok());
+    let r = env.pq_env(&["-u", "--yes"], None, &no_proxy);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("(1 archive already in the cache)"), "{}", r.stdout);
+    assert!(r.stdout.contains("Downloading 1 package ("), "{}", r.stdout);
+    assert_eq!(fs::read_to_string(env.rootpath("usr/lib/lib2.so")).unwrap(), "library v2");
+
+    let r = env.pq_env(&["-l", "-y"], None, &no_proxy);
+    assert!(!r.ok() && r.stderr.contains("-y only applies to"), "{}", r.all());
 }

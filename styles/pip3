@@ -1,0 +1,24 @@
+# Style pip3: build=pip3 (wheel built with pip)
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+# The sources unpack to ${_name}-$version when the recipe sets _name (the
+# name of the Python project), else to $name-$version.
+# pip, wheel and setuptools are first upgraded in the build system, which
+# needs network access during the build.
+
+cd "${_name:-$name}-$version"
+
+pip3 install --upgrade pip
+
+pip3 install wheel
+pip3 install setuptools
+
+pip3 wheel -w dist \
+        --no-cache-dir \
+        --no-build-isolation \
+        --no-deps "$PWD"
+
+pip3 install --no-index \
+        --no-user \
+        --root="$PKG" \
+        --find-links dist \
+        "${_name:-$name}"

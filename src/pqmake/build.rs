@@ -12,6 +12,8 @@ use crate::{fetch, util};
 
 /// Paths inside the build chroot.
 pub const CH_DIR: &str = "/pqmake";
+/// Build style of the recipe, copied into the recipe directory of the build.
+pub const STYLE_FILE: &str = ".pqmake-style";
 pub const CH_MIRROR: &str = "/pqmake/mirror";
 
 /// Output of a build: written to its log file, and to the terminal unless
@@ -340,13 +342,18 @@ impl Pqmake {
             remove_work(&work)?;
             fs::create_dir_all(&work)?;
             fs::create_dir_all(&self.s.log_dir)?;
-            if chrooted {
+            let recipe_copy = if chrooted {
                 self.setup_chroot(&work).with_context(|| format!("cannot set up the build chroot for {name}"))?;
-                copy_tree(&recipe_dir, &ch.join("recipe")).context("unable to copy the recipe")?;
+                ch.join("recipe")
             } else {
                 fs::create_dir_all(&src)?;
                 fs::create_dir_all(&pkg)?;
-                copy_tree(&recipe_dir, &work.join("recipe")).context("unable to copy the recipe")?;
+                work.join("recipe")
+            };
+            copy_tree(&recipe_dir, &recipe_copy).context("unable to copy the recipe")?;
+            if let Some(style) = &r.style {
+                fs::copy(style, recipe_copy.join(STYLE_FILE))
+                    .with_context(|| format!("unable to copy the build style {}", style.display()))?;
             }
             Ok(())
         })();
@@ -375,6 +382,9 @@ impl Pqmake {
                     .arg(format!("cd \"$SRC\"; {script}"))
                     .arg("pqmake")
                     .arg(format!("{CH_DIR}/recipe/Pkgfile"));
+                if r.style.is_some() {
+                    cmd.env("PQMAKE_STYLE_FILE", format!("{CH_DIR}/recipe/{STYLE_FILE}"));
+                }
                 if !log.run(cmd)? {
                     bail!("the build steps failed");
                 }
@@ -393,7 +403,11 @@ impl Pqmake {
                     .env("PQMAKE_GROUPS", &self.s.default_groups)
                     .env("MAKEFLAGS", &self.s.makeflags)
                     .env("CFLAGS", &self.s.cflags)
-                    .env("CXXFLAGS", &self.s.cxxflags);
+                    .env("CXXFLAGS", &self.s.cxxflags)
+                    .env_remove("PQMAKE_STYLE_FILE");
+                if r.style.is_some() {
+                    cmd.env("PQMAKE_STYLE_FILE", work.join("recipe").join(STYLE_FILE));
+                }
                 if !log.run(cmd)? {
                     bail!("the build steps failed");
                 }
@@ -422,6 +436,8 @@ impl Pqmake {
             if let Err(err) = self.package_recipe(name, &work, &pkg, root_opt) {
                 eprintln!("Error: {err:#}");
                 ok = false;
+            } else {
+                self.check_footprints(name);
             }
         }
         if chrooted && self.unmount_all().is_err() {

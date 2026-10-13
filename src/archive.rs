@@ -1,5 +1,8 @@
 //! Package archives: `<name>-<version>-<release>.tar.zst`, holding the files
-//! of the package relative to `/`, plus a `.META` file describing it.
+//! of the package relative to `/`, plus metadata entries at the root of the
+//! archive, which are never extracted: `.META`, describing the package, and
+//! the optional scripts `.PRE-INSTALL`, `.POST-INSTALL`, `.PRE-REMOVE` and
+//! `.POST-REMOVE`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,6 +21,20 @@ fn open(path: &Path) -> Result<tar::Archive<zstd::stream::read::Decoder<'static,
     let decoder =
         zstd::stream::read::Decoder::new(file).with_context(|| format!("unable to read archive {}", path.display()))?;
     Ok(tar::Archive::new(decoder))
+}
+
+/// Package scripts: (name in the recipe directory, entry in the archive).
+pub const SCRIPTS: [(&str, &str); 4] = [
+    ("pre-install", ".PRE-INSTALL"),
+    ("post-install", ".POST-INSTALL"),
+    ("pre-remove", ".PRE-REMOVE"),
+    ("post-remove", ".POST-REMOVE"),
+];
+
+/// True for the metadata entries of an archive (`.META`, scripts), which
+/// are not files of the package.
+pub fn is_metadata(entry: &[u8]) -> bool {
+    entry == b".META" || SCRIPTS.iter().any(|(_, e)| entry == e.as_bytes())
 }
 
 /// Archive entry name without its `./` prefix, leading slashes and trailing
@@ -59,22 +76,105 @@ pub fn list(path: &Path) -> Result<Vec<ListEntry>> {
     Ok(entries)
 }
 
+/// Type and attributes of an archive entry, as stored in its header.
+pub struct EntryInfo {
+    /// Normalized name (see [`normalize_entry`]).
+    pub name: Vec<u8>,
+    /// `-` (file or hard link), `d`, `l`, `c`, `b` or `p`, like `ls -l`.
+    pub kind: char,
+    /// Permission bits, setuid, setgid and sticky bits included.
+    pub mode: u32,
+    pub uid: u64,
+    pub gid: u64,
+    /// Target of a symlink.
+    pub link: Vec<u8>,
+    /// Major and minor numbers of a device.
+    pub device: Option<(u32, u32)>,
+}
+
+/// Type, permissions, owner and link target of the files of an archive,
+/// metadata entries excluded, in archive order.
+pub fn entry_infos(path: &Path) -> Result<Vec<EntryInfo>> {
+    let mut archive = open(path)?;
+    let mut infos = Vec::new();
+    let read = (|| -> io::Result<()> {
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let raw = entry.path_bytes();
+            let name = normalize_entry(&raw).to_vec();
+            let header = entry.header();
+            let t = header.entry_type();
+            if name.is_empty() || name == b"." || is_metadata(&name) {
+                continue;
+            }
+            let kind = if t.is_dir() || raw.ends_with(b"/") {
+                'd'
+            } else if t.is_symlink() {
+                'l'
+            } else if t.is_character_special() {
+                'c'
+            } else if t.is_block_special() {
+                'b'
+            } else if t.is_fifo() {
+                'p'
+            } else if t.is_file() || t.is_hard_link() || t == tar::EntryType::Continuous {
+                '-'
+            } else {
+                continue;
+            };
+            let device = match kind {
+                'c' | 'b' => Some((header.device_major()?.unwrap_or(0), header.device_minor()?.unwrap_or(0))),
+                _ => None,
+            };
+            infos.push(EntryInfo {
+                name,
+                kind,
+                mode: header.mode()? & 0o7777,
+                uid: header.uid()?,
+                gid: header.gid()?,
+                link: if kind == 'l' {
+                    entry.link_name_bytes().map(|l| l.into_owned()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                device,
+            });
+        }
+        Ok(())
+    })();
+    read.with_context(|| format!("unable to read archive {}", path.display()))?;
+    Ok(infos)
+}
+
 /// Content of the `.META` file of an archive, if any.
 pub fn read_meta(path: &Path) -> Result<Option<String>> {
+    let mut found = read_metadata(path, &[".META"])?;
+    Ok(found.remove(".META").map(|c| String::from_utf8_lossy(&c).into_owned()))
+}
+
+/// Contents of some metadata entries of an archive (`.META`, `.POST-INSTALL`...),
+/// by name. Missing entries are absent from the result.
+pub fn read_metadata(path: &Path, names: &[&str]) -> Result<HashMap<String, Vec<u8>>> {
     let mut archive = open(path)?;
-    let found = (|| -> io::Result<Option<String>> {
+    let mut found = HashMap::new();
+    let read = (|| -> io::Result<()> {
         for entry in archive.entries()? {
             let mut entry = entry?;
-            let raw = entry.path_bytes();
-            if raw.as_ref() == b"./.META" || raw.as_ref() == b".META" {
+            let raw = entry.path_bytes().into_owned();
+            let name = String::from_utf8_lossy(raw.strip_prefix(b"./").unwrap_or(&raw)).into_owned();
+            if names.contains(&name.as_str()) && !found.contains_key(&name) {
                 let mut content = Vec::new();
                 entry.read_to_end(&mut content)?;
-                return Ok(Some(String::from_utf8_lossy(&content).into_owned()));
+                found.insert(name, content);
+                if found.len() == names.len() {
+                    break;
+                }
             }
         }
-        Ok(None)
+        Ok(())
     })();
-    found.with_context(|| format!("unable to read archive {}", path.display()))
+    read.with_context(|| format!("unable to read archive {}", path.display()))?;
+    Ok(found)
 }
 
 /// A link whose creation waits for the end of the extraction.
@@ -87,7 +187,7 @@ struct Delayed {
 }
 
 /// Extracts an archive under `root`, like `tar -xf <archive> -C <root>
-/// --exclude=.META --no-overwrite-dir`:
+/// --exclude=.META --no-overwrite-dir` (the scripts are not extracted either):
 /// - existing directories (or symlinks to directories) are left as they
 ///   are, with their permissions;
 /// - existing files are unlinked before being replaced, so that hard links
@@ -112,7 +212,7 @@ pub fn extract(path: &Path, root: &Path) -> Result<()> {
         let mut entry = entry.with_context(|| format!("unable to read archive {}", path.display()))?;
         let raw = entry.path_bytes().into_owned();
         let rel = normalize_entry(&raw).to_vec();
-        if rel.is_empty() || rel == b"." || rel == b".META" {
+        if rel.is_empty() || rel == b"." || is_metadata(&rel) {
             continue;
         }
         if escapes_root(&rel) {

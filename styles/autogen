@@ -1,0 +1,9 @@
+# Style autogen: build=autogen (sources without a configure script)
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+
+cd "$name-$version"
+./autogen.sh
+./configure --prefix=/usr \
+            --disable-static
+make
+make DESTDIR="$PKG" install

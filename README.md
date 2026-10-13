@@ -6,9 +6,11 @@ Gestionnaire de paquets de Great-OS, en Rust.
 paquet --sync          # récupère l'index du dépôt et vérifie sa signature
 paquet -s editeur      # cherche un paquet
 paquet -i nano         # l'installe, avec ses dépendances
-paquet -u              # met tout à jour
+paquet -u              # met tout à jour (affiche d'abord la taille à télécharger)
 paquet -r nano         # le supprime
 paquet autoremove      # supprime les dépendances devenues inutiles
+paquet -Q /usr/bin/nano  # dit à quel paquet appartient un fichier
+paquet -I nano         # affiche ce que l'on sait d'un paquet
 ```
 
 `pq` est un alias de `paquet` : `pq -i nano`.
@@ -22,7 +24,8 @@ paquet autoremove      # supprime les dépendances devenues inutiles
 ## Documentation
 
 - [Utilisation de paquet](docs/utilisation.md) : configurer le dépôt, installer, mettre à jour, supprimer, réparer.
-- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, construire, construire en chroot.
+- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, styles de construction, footprint, construire, construire en chroot.
+- [Scripts et hooks](docs/scripts.md) : scripts d'installation et de suppression, hooks du système (`ldconfig`...).
 - [Générer et publier un dépôt](docs/depot.md) : organisation du miroir, index `PQREPO`, publication.
 - [Signer un dépôt](docs/signature.md) : clés, signature, installation des clés, rotation.
 
@@ -34,7 +37,10 @@ système installé, tient en dix commandes.
 C'est la reprise des scripts `paquet.sh`, `genpqrepo.sh` et `pqmake.sh`. Les
 formats sont les mêmes (index, état local, listes de fichiers, journaux de
 transaction, clés et signatures, archives) : un système, un miroir ou un
-arbre de recettes passe d'une version à l'autre sans conversion.
+arbre de recettes passe d'une version à l'autre sans conversion. Seule
+exception : les scripts de paquets, que les scripts bash ne connaissent pas
+(`paquet.sh` déballerait les fichiers `.PRE-INSTALL`... à la racine sans les
+exécuter).
 
 ## Construction
 
@@ -62,6 +68,9 @@ paquet [OPTION] [--chroot <racine>]
   -r, --remove <paquet>          supprime un paquet dont aucun paquet installé ne dépend
   -u, --upgrade [paquet]         met à jour un paquet, ou tous ceux marqués U (dépendances d'abord)
   -o, --orphans                  liste les dépendances devenues inutiles
+  -Q, --query <fichier>          indique le paquet auquel appartient un fichier
+  -I, --info <paquet>            affiche ce que l'on sait d'un paquet
+  -F, --files <paquet>           liste les fichiers d'un paquet installé
   autoremove, --autoremove       les supprime
   --mark-auto <paquet>           marque un paquet comme installé automatiquement
   --mark-explicit <paquet>       marque un paquet comme installé explicitement
@@ -70,6 +79,8 @@ paquet [OPTION] [--chroot <racine>]
   -C, --cache                    affiche la taille du cache et propose de le vider
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
+  --noscripts                    ne lance ni scripts ni hooks
+  -y, --yes                      ne demande pas de confirmation (-u, autoremove, -C)
 ```
 
 États : `N` non installé, `I` installé explicitement, `A` installé
@@ -83,11 +94,17 @@ plus dans le dépôt.
 ```sh
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
+PARALLEL_DOWNLOADS=4      # facultatif : téléchargements simultanés (1 à 16)
 ```
 
 Les paquets sont pris dans `$MIRROR/$BRANCH/$(uname -m)/`. Les URL `http://`,
 `https://` et `file://` sont acceptées ; les variables de proxy habituelles
 (`https_proxy`, `no_proxy`...) sont respectées.
+
+`-i` et `-u` téléchargent toutes les archives nécessaires, plusieurs à la
+fois, avec une ligne de progression dans un terminal, avant de toucher au
+système : une archive manquante ou abîmée arrête la commande sans rien
+modifier.
 
 Les clés publiques de confiance sont dans `/etc/pq/keys/*.pub`. `--sync`
 refuse un index sans signature valide (sauf avec `--nosign`, déconseillé), et
@@ -117,6 +134,9 @@ remplacent ces deux chemins.
   annule l'opération inachevée.
 - Une seule instance modifie un système à la fois (verrou
   `/var/lib/pq/lock`).
+- Les scripts `pre-install` et `pre-remove` d'un paquet peuvent annuler
+  l'opération ; scripts et hooks s'exécutent dans le système géré (chroot),
+  sans fichier temporaire.
 
 ## genpqrepo
 
@@ -151,6 +171,7 @@ pqmake -n nano                 # affiche le plan de construction
 pqmake nano                    # construit nano et ce dont il a besoin
 pqmake -a -k --index           # construit tout, continue après un échec, met à jour PQREPO
 pqmake --chroot /srv/rootfs nano
+pqmake --update-footprint nano # accepte les changements de footprint signalés
 ```
 
 Les recettes sont rangées en `<recettes>/<ensemble>/<nom>/Pkgfile`, à la
@@ -160,6 +181,15 @@ manière des recettes CRUX (`name`, `version`, `release`, `source`, fonction
 vont dans `<dépôt>/<ensemble>/`. Une recette dont l'archive existe déjà pour
 sa version et sa release n'est pas reconstruite (sauf `-f`).
 
+- Une recette sans fonction `build()` utilise un style de construction
+  partagé (`build=meson`), cherché dans `<recettes>/styles/` puis
+  `/etc/pqmake/styles/`. Les styles courants (autotools, meson, cmake,
+  kde6, python3, pip3...) sont fournis dans [`styles/`](styles/).
+- Après chaque construction, le contenu des archives est comparé au
+  `.footprint` de la recette (fichiers, droits, propriétaires, à la CRUX) ;
+  les différences, setuid compris, sont signalées au packageur.
+- Les fichiers `pre-install`, `post-install`, `pre-remove` et `post-remove`
+  de la recette deviennent les scripts du paquet, lancés par `paquet`.
 - Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`, `sources`,
   `locale`) deviennent des sous-paquets `<nom>.<groupe>`.
 - Les dépendances d'exécution sont détectées en lisant les bibliothèques
@@ -175,7 +205,7 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
 
 Les réglages viennent de `~/.config/pqmake` (ou `$PQMAKE_CONFIG`) :
 `RECIPES_DIR`, `REPO_DIR`, `WORK_DIR`, `SOURCES_DIR`, `LOG_DIR`, `MAKEFLAGS`,
-`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `CHROOT`.
+`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `STYLES_DIR`, `CHROOT`.
 
 ## Différences avec les scripts bash
 

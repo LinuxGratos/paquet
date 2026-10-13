@@ -6,8 +6,8 @@
 
 Les commandes qui modifient le système (`--sync`, `-i`, `-r`, `-u`,
 `autoremove`, `--mark-*`, `-C`, `--purge-old-cache`, `--recover`) doivent être
-lancées en root. Les autres (`-l`, `-s`, `-o`, `--cache-info`) peuvent l'être
-par n'importe quel utilisateur.
+lancées en root. Les autres (`-l`, `-s`, `-o`, `-Q`, `-I`, `-F`,
+`--cache-info`) peuvent l'être par n'importe quel utilisateur.
 
 ## Configuration
 
@@ -16,12 +16,14 @@ par n'importe quel utilisateur.
 ```sh
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
+PARALLEL_DOWNLOADS=4
 ```
 
 | Réglage | Rôle | Par défaut |
 |---|---|---|
 | `MIRROR` | adresse du miroir : `https://`, `http://` ou `file://` | (obligatoire) |
 | `BRANCH` | branche suivie (`stable`, `testing`...) | `stable` |
+| `PARALLEL_DOWNLOADS` | nombre de téléchargements simultanés (1 à 16) | `4` |
 
 Les paquets sont cherchés dans `$MIRROR/$BRANCH/<architecture>/`, où
 l'architecture est celle de `uname -m` (`x86_64`, `aarch64`...). Avec la
@@ -90,6 +92,10 @@ ligne par paquet.
 ```console
 # paquet -i salut
 Installing salut and its dependencies: libsalut salut
+Downloading 2 packages (1.3 MiB):
+  ✓ salut 0.3-2       96.4 KiB
+  ✓ libsalut 1.2-1     1.2 MiB
+  1.3 MiB downloaded in 0.8 s, 1.6 MiB/s
 Installing package: libsalut
 Extracting package files...
 libsalut installed successfully!
@@ -98,8 +104,10 @@ Extracting package files...
 salut installed successfully!
 ```
 
-Les dépendances manquantes sont installées d'abord. Chaque archive est
-vérifiée (somme SHA-256 de l'index signé) avant d'être déballée.
+Les dépendances manquantes sont installées d'abord. Toutes les archives sont
+téléchargées avant que le système ne soit touché (voir
+[Les téléchargements](#les-téléchargements)), et chacune est vérifiée (somme
+SHA-256 de l'index signé).
 
 L'installation est refusée si elle écraserait un fichier qui existe déjà
 (fichier d'un autre paquet, ou créé à la main) ; la liste des fichiers en
@@ -112,15 +120,64 @@ cause est affichée et rien n'est modifié. Seule exception, les fichiers de
 # paquet --sync
 # paquet -u
 Packages available for upgrade (in upgrade order):
-salut
+  libsalut  1.2-1 -> 1.3-1
+  salut     0.3-2 -> 0.4-1
+New dependencies to install: libbonjour
+Download size: 1.6 MiB (1 archive already in the cache)
 Do you want to upgrade these packages? [Y/n]
 ```
 
 `paquet -u` met à jour tous les paquets marqués `U` (une nouvelle version est
-dans l'index), les dépendances d'abord, après confirmation. `paquet -u nano`
-ne met à jour que `nano`. Les nouvelles dépendances d'une nouvelle version
-sont installées automatiquement ; les fichiers que la nouvelle version ne
-fournit plus sont supprimés.
+dans l'index), les dépendances d'abord, après confirmation. Avant la
+question, il affiche les versions, les nouvelles dépendances et la taille
+totale à télécharger. `paquet -u -y` ne pose pas la question (pour un script
+ou une tâche planifiée).
+
+`paquet -u nano` ne met à jour que `nano`, sans confirmation. Les nouvelles
+dépendances d'une nouvelle version sont installées automatiquement ; les
+fichiers que la nouvelle version ne fournit plus sont supprimés.
+
+### Les téléchargements
+
+`paquet -i` et `paquet -u` téléchargent d'abord toutes les archives
+nécessaires, plusieurs à la fois (`PARALLEL_DOWNLOADS`, 4 par défaut), puis
+seulement installent. Une archive manquante sur le miroir, ou dont la somme
+ne correspond pas à l'index, arrête donc la commande avant toute
+modification du système :
+
+```console
+# paquet -u -y
+...
+Downloading 2 packages (1.2 MiB + 1 of unknown size):
+  ✓ libsalut 1.3-1     1.2 MiB
+  ✗ salut 0.4-1         failed
+Error: failed to download https://miroir.exemple.org/great-os/stable/x86_64/extra/salut-0.4-1.tar.zst: http status: 404
+Error: 1 download of 2 failed; nothing was changed.
+```
+
+Les archives bien arrivées restent dans le cache : la commande suivante ne
+télécharge que ce qui manque. Un transfert interrompu par le réseau est
+retenté une fois.
+
+Dans un terminal, une ligne de progression sous la liste des archives
+terminées donne l'avancement, la quantité reçue et le débit ; elle disparaît
+à la fin :
+
+```text
+Downloading 5 packages (30.5 MiB):
+  ✓ beta 1.0-1        5.9 MiB
+  ✓ epsilon 1.0-1     6.5 MiB
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────────   72%   22.0 MiB / 30.5 MiB   19.9 MiB/s
+```
+
+Hors terminal (redirection vers un fichier, tâche planifiée), seules les
+lignes des archives terminées sont écrites. Sans locale UTF-8, la barre est
+faite de `#` et de `-`, sans les symboles ✓ et ✗ ; la variable `NO_COLOR`
+supprime les couleurs.
+
+La taille annoncée vient du miroir (requête HTTP `HEAD`) : si le serveur ne
+la donne pas, elle est signalée comme inconnue (`+ 1 of unknown size`) et la
+barre n'affiche que la quantité reçue.
 
 ### Supprimer
 
@@ -146,7 +203,7 @@ non.
 
 ```sh
 paquet -o              # liste les orphelins
-paquet autoremove      # les supprime, après confirmation
+paquet autoremove      # les supprime, après confirmation (-y : sans)
 ```
 
 Pour garder un paquet installé comme dépendance, ou au contraire le laisser
@@ -159,6 +216,73 @@ paquet --mark-auto libsalut        # I -> A
 
 `paquet -i` sur un paquet déjà installé comme dépendance le marque aussi comme
 installé explicitement.
+
+### Consulter
+
+`paquet -I` affiche ce que l'on sait d'un paquet, installé ou non :
+
+```console
+$ paquet -I salut
+Name           : salut
+Version        : 0.3-3
+Description    : Dit bonjour
+Set            : extra
+Folder         : extra
+Groups         : -
+Depends        : libsalut
+Status         : I (installed explicitly)
+Required by    : -
+Files          : 2
+Installed size : 47 B
+Scripts        : -
+```
+
+Pour un paquet installé s'ajoutent les paquets installés qui en dépendent
+(`Required by`), le nombre de fichiers, la place occupée et ses scripts
+(voir [Scripts et hooks](scripts.md)). Si une mise à jour est disponible, la
+ligne `Available` donne la nouvelle version.
+
+`paquet -Q` dit à quel paquet appartient un fichier, `paquet -F` liste les
+fichiers d'un paquet installé :
+
+```console
+$ paquet -Q /usr/lib/libsalut.so.1
+/usr/lib/libsalut.so.1 is owned by libsalut 1.2-1
+$ paquet -F salut
+/etc
+/etc/salut.conf
+/usr/bin
+/usr/bin/salut
+```
+
+Le chemin donné à `-Q` peut être relatif (au répertoire courant) ou passer
+par un lien symbolique (`/lib/libz.so.1` quand `/lib` pointe vers
+`usr/lib`). Un fichier qui n'appartient à aucun paquet fait échouer la
+commande. `-F` liste les répertoires que le paquet a créés en plus de ses
+fichiers.
+
+## Scripts et hooks
+
+Un paquet peut fournir des scripts, lancés avant ou après son installation,
+sa mise à jour ou sa suppression (créer l'utilisateur d'un service, par
+exemple). Le système peut avoir des hooks, dans `/etc/pq/hooks/`, lancés une
+fois à la fin d'une commande quand des fichiers qui les concernent ont été
+installés ou supprimés (`ldconfig` après l'installation de bibliothèques,
+par exemple) :
+
+```text
+Running the post-install script of serveur...
+Running hook: Updating the shared library cache
+```
+
+Un script `pre-install` ou `pre-remove` qui échoue annule l'opération. Un
+script `post-install` ou `post-remove`, ou un hook, qui échoue est signalé et
+fait échouer la commande, mais l'opération reste faite. `--noscripts` (avec
+`-i`, `-r`, `-u` et `autoremove`) ne lance ni scripts ni hooks : à réserver au
+dépannage, puisque le paquet peut alors rester incomplet (un utilisateur
+non créé, un cache non mis à jour).
+
+Le détail est dans [Scripts et hooks](scripts.md).
 
 ## Les états
 
@@ -234,7 +358,11 @@ paquet -i base --chroot /mnt/great-os
 
 Les fichiers sont installés sous la racine, et toute la base de paquets est
 prise sous `<racine>/var/lib/pq/`. La configuration (`/etc/pq.conf`) et les
-clés (`/etc/pq/keys/`) restent celles du système qui lance la commande.
+clés (`/etc/pq/keys/`) restent celles du système qui lance la commande. Les
+scripts des paquets et les hooks (ceux de `<racine>/etc/pq/hooks/`)
+s'exécutent dans la racine, avec `chroot` : il faut donc être root, et la
+racine doit avoir un `/bin/sh` (sinon ils sont sautés, avec un
+avertissement).
 
 ## Référence
 
@@ -248,6 +376,9 @@ paquet [OPTION] [--chroot <racine>]
   -r, --remove <paquet>          supprime un paquet dont aucun paquet installé ne dépend
   -u, --upgrade [paquet]         met à jour un paquet, ou tous ceux marqués U
   -o, --orphans                  liste les dépendances devenues inutiles
+  -Q, --query <fichier>          indique le paquet auquel appartient un fichier
+  -I, --info <paquet>            affiche ce que l'on sait d'un paquet
+  -F, --files <paquet>           liste les fichiers d'un paquet installé
   autoremove, --autoremove       les supprime
   --mark-auto <paquet>           marque un paquet comme installé automatiquement
   --mark-explicit <paquet>       marque un paquet comme installé explicitement
@@ -256,6 +387,8 @@ paquet [OPTION] [--chroot <racine>]
   -C, --cache                    affiche la taille du cache et propose de le vider
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
+  --noscripts                    ne lance ni scripts ni hooks (avec -i, -r, -u, autoremove)
+  -y, --yes                      ne demande pas de confirmation (-u, autoremove, -C)
   -h, --help                     affiche l'aide
 ```
 
@@ -265,13 +398,15 @@ le miroir ou le trafic réseau peut faire installer ce qu'il veut.
 
 | Fichier | Contenu |
 |---|---|
-| `/etc/pq.conf` | `MIRROR` et `BRANCH` (variable `PQ_CONFIG` pour un autre chemin) |
+| `/etc/pq.conf` | `MIRROR`, `BRANCH` et `PARALLEL_DOWNLOADS` (variable `PQ_CONFIG` pour un autre chemin) |
 | `/etc/pq/keys/*.pub` | clés publiques de confiance (variable `PQ_KEYS_DIR`) |
 | `/var/lib/pq/PQREPO` | index du dépôt, tel que récupéré |
 | `/var/lib/pq/PQREPOSTATE` | état de chaque paquet connu |
 | `/var/lib/pq/files/<paquet>` | fichiers installés par chaque paquet |
 | `/var/lib/pq/cache/` | archives téléchargées |
 | `/var/lib/pq/transaction/` | journaux des opérations en cours |
+| `/var/lib/pq/scripts/<paquet>/` | scripts des paquets installés |
+| `/etc/pq/hooks/*.hook` | hooks du système |
 | `/var/lib/pq/lock` | verrou |
 
 Codes de sortie : `0` succès, `1` erreur, `130` ou `143` interruption

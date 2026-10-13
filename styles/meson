@@ -1,0 +1,10 @@
+# Style meson: build=meson
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+
+meson setup --prefix=/usr \
+            --libdir=/usr/lib \
+            "$name-$version" \
+            build
+
+ninja -C build
+DESTDIR="$PKG" ninja -C build install

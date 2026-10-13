@@ -300,6 +300,16 @@ impl Pqmake {
             let deps = unique_words(depends[i].iter().map(String::as_str));
             self.write_archive(name, &packages[i], dir, group, &description, &deps)?;
         }
+        // A subpackage this build no longer produces must not stay next to
+        // the new main package (rebuild of the same version)
+        for group in super::KNOWN_GROUPS {
+            let pkgname = format!("{name}.{group}");
+            let stale = self.archive_path(name, &pkgname);
+            if !packages.contains(&pkgname) && stale.is_file() {
+                fs::remove_file(&stale).with_context(|| format!("unable to remove {}", stale.display()))?;
+                println!("  {} removed (no longer produced)", stale.display());
+            }
+        }
         self.index_dirty = true;
         Ok(())
     }
@@ -320,6 +330,19 @@ impl Pqmake {
         }
         fs::write(root.join(".META"), meta)?;
         fs::set_permissions(root.join(".META"), fs::Permissions::from_mode(0o644))?;
+        // The scripts of the recipe (pre-install, post-install, pre-remove,
+        // post-remove) go with its main package
+        if pkgname == name {
+            let recipe_dir = self.recipe_path[name].parent().unwrap_or(Path::new("."));
+            for (script, entry) in archive::SCRIPTS {
+                if recipe_dir.join(script).is_file() {
+                    fs::copy(recipe_dir.join(script), root.join(entry))
+                        .with_context(|| format!("unable to add the {script} script"))?;
+                    fs::set_permissions(root.join(entry), fs::Permissions::from_mode(0o644))?;
+                    println!("  with its {script} script");
+                }
+            }
+        }
         if let Some(dir) = archive_path.parent() {
             fs::create_dir_all(dir)?;
         }

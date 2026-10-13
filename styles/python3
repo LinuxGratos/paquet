@@ -1,0 +1,8 @@
+# Style python3: build=python3 (setup.py)
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+# The sources unpack to ${_name}-$version when the recipe sets _name (the
+# name of the Python project), else to $name-$version.
+
+cd "${_name:-$name}-$version"
+python3 setup.py build
+python3 setup.py install --prefix=/usr --root="$PKG"

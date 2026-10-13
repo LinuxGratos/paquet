@@ -21,6 +21,9 @@ pub fn display_help(prog: &str, keys_dir: &std::path::Path) {
     println!("  -u, --upgrade [package_name] Upgrade a package, or all packages with status 'U'");
     println!("                               (dependencies first)");
     println!("  -o, --orphans                List automatically installed packages no longer needed");
+    println!("  -Q, --query <file>           Show the package owning a file");
+    println!("  -I, --info <package_name>    Show what is known about a package");
+    println!("  -F, --files <package_name>   List the files of an installed package");
     println!("  autoremove, --autoremove     Remove all orphan packages");
     println!("  --mark-auto <package_name>   Mark an installed package as installed automatically");
     println!("  --mark-explicit <package_name> Mark an installed package as installed explicitly");
@@ -33,6 +36,9 @@ pub fn display_help(prog: &str, keys_dir: &std::path::Path) {
     println!();
     println!("  --chroot <path>              Manage the system installed under <path>");
     println!("                               (its database lives in <path>/var/lib/pq)");
+    println!("  --noscripts                  Run neither the package scripts nor the hooks");
+    println!("                               (with -i, -r, -u, autoremove)");
+    println!("  -y, --yes                    Do not ask for confirmation (-u, autoremove, -C)");
     println!();
     println!("Trusted signing keys: {}/*.pub", keys_dir.display());
     println!();
@@ -49,14 +55,18 @@ pub fn main() -> i32 {
 }
 
 fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
-    // --chroot and --nosign may appear anywhere
+    // --chroot, --nosign, --noscripts and -y may appear anywhere
     let mut chroot: Option<PathBuf> = None;
     let mut nosign = false;
+    let mut noscripts = false;
+    let mut yes = false;
     let mut args = Vec::new();
     let mut iter = raw_args.into_iter();
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--nosign" => nosign = true,
+            "--noscripts" => noscripts = true,
+            "-y" | "--yes" => yes = true,
             "--chroot" => match iter.next() {
                 Some(dir) if !dir.is_empty() && !dir.starts_with('-') => chroot = Some(dir.into()),
                 _ => bail!("--chroot requires a path argument."),
@@ -78,15 +88,48 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     if nosign && !matches!(command, "-S" | "--sync") {
         bail!("--nosign only applies to -S, --sync.");
     }
+    if noscripts
+        && !matches!(
+            command,
+            "-i" | "--install" | "-r" | "--remove" | "-u" | "--upgrade" | "autoremove" | "--autoremove"
+        )
+    {
+        bail!("--noscripts only applies to -i, -r, -u and autoremove.");
+    }
+    if yes
+        && !matches!(
+            command,
+            "-i" | "--install"
+                | "-r"
+                | "--remove"
+                | "-u"
+                | "--upgrade"
+                | "autoremove"
+                | "--autoremove"
+                | "-C"
+                | "--cache"
+        )
+    {
+        bail!("-y only applies to -i, -r, -u, autoremove and -C.");
+    }
 
     if !paths.config_file.is_file() {
         bail!("Configuration file {} not found!", paths.config_file.display());
     }
     let (mut mirror, mut branch) = (String::new(), String::new());
+    let mut jobs = super::download::DEFAULT_JOBS;
     for (key, value) in config::read(&paths.config_file)? {
         match key.as_str() {
             "MIRROR" => mirror = value,
             "BRANCH" => branch = value,
+            "PARALLEL_DOWNLOADS" => match value.parse::<usize>() {
+                Ok(n) if (1..=super::download::MAX_JOBS).contains(&n) => jobs = n,
+                _ => eprintln!(
+                    "Warning: PARALLEL_DOWNLOADS must be between 1 and {} in {}; using {jobs}",
+                    super::download::MAX_JOBS,
+                    paths.config_file.display()
+                ),
+            },
             _ => eprintln!("Warning: ignoring unknown setting {key} in {}", paths.config_file.display()),
         }
     }
@@ -95,11 +138,24 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     }
     let mut pq = Paquet::new(paths, mirror, branch, util::machine_arch(), prog.to_string());
     pq.nosign = nosign;
+    pq.noscripts = noscripts;
+    pq.assume_yes = yes;
+    pq.jobs = jobs;
 
     // Package names end up in paths: reject anything unsafe early
     if matches!(
         command,
-        "-i" | "--install" | "-r" | "--remove" | "-u" | "--upgrade" | "--mark-auto" | "--mark-explicit"
+        "-i" | "--install"
+            | "-r"
+            | "--remove"
+            | "-u"
+            | "--upgrade"
+            | "--mark-auto"
+            | "--mark-explicit"
+            | "-I"
+            | "--info"
+            | "-F"
+            | "--files"
     ) {
         if let Some(name) = operand {
             if !util::is_valid_name(name) {
@@ -152,7 +208,7 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
         }
     };
 
-    match command {
+    let result = match command {
         "-S" | "--sync" => pq.sync(),
         "-i" | "--install" => {
             let name = need_operand("package name")?.to_string();
@@ -178,6 +234,18 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
             }
             None => pq.upgrade_all(),
         },
+        "-Q" | "--query" => {
+            let file = need_operand("file")?.to_string();
+            pq.query(&file)
+        }
+        "-I" | "--info" => {
+            let name = need_operand("package name")?.to_string();
+            pq.info(&name)
+        }
+        "-F" | "--files" => {
+            let name = need_operand("package name")?.to_string();
+            pq.files(&name)
+        }
         "-o" | "--orphans" => {
             pq.list_orphans();
             Ok(())
@@ -204,5 +272,14 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
             display_help(prog, &pq.paths.keys_dir);
             Err(Reported.into())
         }
+    };
+
+    // Hooks run once, for everything the command installed or removed
+    if !matches!(&result, Err(err) if err.downcast_ref::<crate::Interrupted>().is_some()) {
+        pq.run_hooks();
     }
+    if result.is_ok() && pq.scripts_failed() {
+        return Err(Reported.into());
+    }
+    result
 }

@@ -1,0 +1,8 @@
+# Shipped by the glibc package: /etc/pq/hooks/ldconfig.hook
+Description=Updating the shared library cache
+Path=lib/*.so*
+Path=lib64/*.so*
+Path=usr/lib/*.so*
+Path=usr/lib64/*.so*
+Path=etc/ld.so.conf*
+Exec=/sbin/ldconfig
