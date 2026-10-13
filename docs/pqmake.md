@@ -31,7 +31,15 @@ Deux recettes ne peuvent pas porter le même nom, même dans deux ensembles.
 
 ### Le `Pkgfile`
 
-Le `Pkgfile` est un script bash, dans la syntaxe de NuTyX :
+Le `Pkgfile` est un script bash, à la manière des recettes CRUX : des
+variables `name`, `version`, `release` et `source`, et une fonction `build()`
+qui installe le paquet dans `$PKG`.
+
+À la différence de CRUX, la description et les dépendances sont des
+variables (`description`, `makedepends`, `run`) : les commentaires d'en-tête
+`# Description:` et `# Depends on:` ne sont pas lus. Une recette CRUX reprise
+telle quelle se construit, mais son paquet n'aura ni description ni
+dépendances déclarées (seules les dépendances détectées automatiquement).
 
 ```bash
 description="Dit bonjour"

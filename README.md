@@ -153,9 +153,10 @@ pqmake -a -k --index           # construit tout, continue après un échec, met 
 pqmake --chroot /srv/rootfs nano
 ```
 
-Les recettes sont rangées en `<recettes>/<ensemble>/<nom>/Pkgfile` (syntaxe
-de NuTyX : `name`, `version`, `release`, `description`, `makedepends`, `run`,
-`run_devel`, `source`, fonctions `prepare`, `build`, `package`). Les archives
+Les recettes sont rangées en `<recettes>/<ensemble>/<nom>/Pkgfile`, à la
+manière des recettes CRUX (`name`, `version`, `release`, `source`, fonction
+`build`), avec en plus des variables pour la description et les dépendances
+(`description`, `makedepends`, `run`, `run_devel`). Les archives
 vont dans `<dépôt>/<ensemble>/`. Une recette dont l'archive existe déjà pour
 sa version et sa release n'est pas reconstruite (sauf `-f`).
 

@@ -1,6 +1,6 @@
 //! `pqmake`: builds Great-OS packages from their recipes, dependencies first.
 //!
-//! A recipe is a directory holding a `Pkgfile` (NuTyX-style syntax):
+//! A recipe is a directory holding a `Pkgfile` (in the style of CRUX):
 //! `<recipes>/<set>/<name>/Pkgfile`. Each build produces
 //! `<name>-<version>-<release>.tar.zst` archives, ready for `genpqrepo` and
 //! `paquet`, in `<repo>/<set>/`. A recipe whose archive is already there for
