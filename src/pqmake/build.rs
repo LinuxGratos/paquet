@@ -271,9 +271,66 @@ impl Pqmake {
         Err(last.unwrap_or_else(|| anyhow!("cannot download {url}")))
     }
 
-    /// Downloads (to `SOURCES_DIR/<recipe>`, once) or picks up the recipe's
-    /// sources, and unpacks the archives into `src`. Other files are copied
-    /// as they are.
+    /// Finds a source file that is not in the cache among the sources kept
+    /// by the `<name>.sources` package of this version: installed in
+    /// `USR_SRC_DIR/<name>-<version>/`, or in its archive in the repository
+    /// (any release). Copies it to `dest` (in the cache) when found.
+    fn find_kept_source(&self, name: &str, file: &str, dest: &Path, log: &mut Log) -> bool {
+        let r = self.recipe(name);
+        let rel = format!("{name}-{}/{file}", r.version);
+        let installed = self.s.usr_src_dir.join(&rel);
+        if installed.is_file() {
+            let part = util::with_suffix(dest, ".part");
+            match fs::copy(&installed, &part).and_then(|_| fs::rename(&part, dest)) {
+                Ok(()) => {
+                    log.line(&format!(
+                        "Using {file} from {}",
+                        self.s.usr_src_dir.join(format!("{name}-{}", r.version)).display()
+                    ));
+                    return true;
+                }
+                Err(err) => {
+                    let _ = fs::remove_file(&part);
+                    log.line(&format!("Warning: unable to copy {}: {err}", installed.display()));
+                }
+            }
+        }
+        let entry = format!("usr/src/{rel}");
+        for archive in self.sources_archives(name) {
+            match crate::archive::extract_file(&archive, entry.as_bytes(), dest) {
+                Ok(true) => {
+                    log.line(&format!("Using {file} from {}", archive.display()));
+                    return true;
+                }
+                Ok(false) => {}
+                Err(err) => log.line(&format!("Warning: {err:#}")),
+            }
+        }
+        false
+    }
+
+    /// Archives of the `sources` subpackage of a recipe's version in the
+    /// repository, newest release first.
+    fn sources_archives(&self, name: &str) -> Vec<PathBuf> {
+        let r = self.recipe(name);
+        let dir = self.s.repo_dir.join(&self.recipe_set[name]);
+        let wanted = format!("{name}.sources");
+        let mut found: Vec<(String, PathBuf)> = util::files_with_suffix(&dir, "-sources.tar.zst")
+            .into_iter()
+            .filter_map(|path| {
+                let base = path.file_name()?.to_str()?.strip_suffix(".tar.zst")?.to_string();
+                let (pkg, version, release) = util::split_archive_base(&base)?;
+                (pkg == wanted && version == r.version).then(|| (release.to_string(), path.clone()))
+            })
+            .collect();
+        found.sort_by(|a, b| crate::version::compare(&b.0, &a.0));
+        found.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// Gets the recipe's sources to `SOURCES_DIR/<recipe>` (once: from the
+    /// sources kept by its `sources` package, else by downloading them) or
+    /// picks them up in the recipe, and unpacks the archives into `src`.
+    /// Other files are copied as they are.
     fn prepare_sources(&self, name: &str, src: &Path, log: &mut Log) -> Result<()> {
         let recipe_dir = self.recipe_path[name].parent().unwrap_or(Path::new(".")).to_path_buf();
         for entry in &self.recipe(name).sources {
@@ -287,9 +344,11 @@ impl Pqmake {
                 let dir = self.s.sources_dir.join(name);
                 let path = dir.join(file);
                 if !path.is_file() {
-                    log.line(&format!("Downloading {entry}"));
                     fs::create_dir_all(&dir)?;
-                    self.download_source(entry, &path, log).with_context(|| format!("cannot download {entry}"))?;
+                    if !self.find_kept_source(name, file, &path, log) {
+                        log.line(&format!("Downloading {entry}"));
+                        self.download_source(entry, &path, log).with_context(|| format!("cannot download {entry}"))?;
+                    }
                 }
                 path
             } else {
@@ -436,8 +495,6 @@ impl Pqmake {
             if let Err(err) = self.package_recipe(name, &work, &pkg, root_opt) {
                 eprintln!("Error: {err:#}");
                 ok = false;
-            } else {
-                self.check_footprints(name);
             }
         }
         if chrooted && self.unmount_all().is_err() {

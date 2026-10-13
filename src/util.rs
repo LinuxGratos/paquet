@@ -66,15 +66,51 @@ pub fn is_valid_version(version: &str) -> bool {
     !version.is_empty() && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '~'))
 }
 
-/// Splits `<name>-<version>-<release>.tar.zst` (the `.tar.zst` already
-/// removed) into its three parts. Returns None when a part is missing.
-pub fn split_archive_base(base: &str) -> Option<(&str, &str, &str)> {
-    let (rest, release) = base.rsplit_once('-')?;
-    let (name, version) = rest.rsplit_once('-')?;
-    if name.is_empty() {
-        return None;
+/// Subpackages a recipe can split off: `<name>.<group>`, whose archive is
+/// `<name>-<version>-<release>-<group>.tar.zst`.
+pub const PACKAGE_GROUPS: [&str; 6] = ["devel", "doc", "man", "service", "sources", "locale"];
+
+/// Archive file name of a package: `nano-8.0-1.tar.zst`, and for the
+/// subpackage `nano.devel`, `nano-8.0-1-devel.tar.zst`.
+pub fn archive_file_name(name: &str, version: &str, release: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((base, group)) if !base.is_empty() && PACKAGE_GROUPS.contains(&group) => {
+            format!("{base}-{version}-{release}-{group}.tar.zst")
+        }
+        _ => format!("{name}-{version}-{release}.tar.zst"),
     }
-    Some((name, version, release))
+}
+
+/// Splits an archive name (the `.tar.zst` already removed) into package
+/// name, version and release: `nano-8.0-1` gives (nano, 8.0, 1), and
+/// `nano-8.0-1-devel` gives (nano.devel, 8.0, 1). Returns None when a part
+/// is missing.
+pub fn split_archive_base(base: &str) -> Option<(String, &str, &str)> {
+    fn split(base: &str) -> Option<(String, &str, &str)> {
+        let (rest, release) = base.rsplit_once('-')?;
+        let (name, version) = rest.rsplit_once('-')?;
+        (!name.is_empty()).then(|| (name.to_string(), version, release))
+    }
+    if let Some((rest, group)) = base.rsplit_once('-') {
+        if PACKAGE_GROUPS.contains(&group) {
+            if let Some((name, version, release)) = split(rest) {
+                return Some((format!("{name}.{group}"), version, release));
+            }
+        }
+    }
+    split(base)
+}
+
+/// True for the archive name of a subpackage in the former form
+/// (`nano.devel-8.0-1`), which no longer matches its index record.
+pub fn is_old_group_archive(base: &str) -> bool {
+    match split_archive_base(base) {
+        Some((name, _, _)) => {
+            name.rsplit_once('.').is_some_and(|(_, g)| PACKAGE_GROUPS.contains(&g))
+                && !PACKAGE_GROUPS.iter().any(|g| base.ends_with(&format!("-{g}")))
+        }
+        None => false,
+    }
 }
 
 /// SHA-256 of a file, in lowercase hexadecimal.
@@ -366,10 +402,22 @@ mod tests {
 
     #[test]
     fn archive_names() {
-        assert_eq!(split_archive_base("nano-8.0-1"), Some(("nano", "8.0", "1")));
-        assert_eq!(split_archive_base("gtk-doc-1.33-2"), Some(("gtk-doc", "1.33", "2")));
-        assert_eq!(split_archive_base("nano-8.0"), None);
-        assert_eq!(split_archive_base("-8.0-1"), None);
+        let split = |b| split_archive_base(b).map(|(n, v, r)| (n, v.to_string(), r.to_string()));
+        let parts = |n: &str, v: &str, r: &str| Some((n.to_string(), v.to_string(), r.to_string()));
+        assert_eq!(split("nano-8.0-1"), parts("nano", "8.0", "1"));
+        assert_eq!(split("gtk-doc-1.33-2"), parts("gtk-doc", "1.33", "2"));
+        assert_eq!(split("nano-8.0-1-devel"), parts("nano.devel", "8.0", "1"));
+        assert_eq!(split("gtk-doc-1.33-2-sources"), parts("gtk-doc.sources", "1.33", "2"));
+        // Without a release, -devel is the release
+        assert_eq!(split("foo-1.0-devel"), parts("foo", "1.0", "devel"));
+        assert_eq!(split("nano-8.0"), None);
+        assert_eq!(split("-8.0-1"), None);
+        assert_eq!(archive_file_name("nano", "8.0", "1"), "nano-8.0-1.tar.zst");
+        assert_eq!(archive_file_name("nano.devel", "8.0", "1"), "nano-8.0-1-devel.tar.zst");
+        assert_eq!(archive_file_name("python3.11", "3.11.9", "1"), "python3.11-3.11.9-1.tar.zst");
+        assert!(is_old_group_archive("nano.devel-8.0-1"));
+        assert!(!is_old_group_archive("nano-8.0-1-devel"));
+        assert!(!is_old_group_archive("nano-8.0-1"));
     }
 
     #[test]

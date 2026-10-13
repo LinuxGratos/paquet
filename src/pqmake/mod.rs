@@ -26,7 +26,7 @@ use crate::util::{self, is_valid_name, is_valid_version};
 use crate::{config, signals};
 
 /// Subpackages a recipe can split off with `PKGMK_GROUPS`: `<name>.<group>`.
-pub const KNOWN_GROUPS: [&str; 6] = ["devel", "doc", "man", "service", "sources", "locale"];
+pub const KNOWN_GROUPS: [&str; 6] = util::PACKAGE_GROUPS;
 
 pub fn is_known_group(group: &str) -> bool {
     KNOWN_GROUPS.contains(&group)
@@ -61,7 +61,8 @@ const RECIPE_FIELDS: &str = r#"
 printf "%s\n" "${name:-}" "${version:-}" "${release:-1}" \
     "${description//$'\n'/ }" "${makedepends[*]}" "${run[*]}" \
     "${run_devel[*]}" "${PKGMK_GROUPS[*]}" "${source[*]}" \
-    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}" "${build:-}" "$PQMAKE_BUILD_FUNCTION"
+    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}" "${build:-}" "$PQMAKE_BUILD_FUNCTION" \
+    "${PKGMK_IGNORE_GROUPS[*]}"
 "#;
 
 /// Build of a recipe: prepare(), build() and package(), when defined, each
@@ -94,6 +95,9 @@ pub struct Settings {
     pub default_groups: String,
     /// Shared build styles (`build=<style>`), after `<recipes>/styles`.
     pub styles_dir: PathBuf,
+    /// Sources installed by `<name>.sources` packages, looked up before
+    /// downloading.
+    pub usr_src_dir: PathBuf,
     pub dry_run: bool,
     pub keep_going: bool,
     pub quiet: bool,
@@ -123,6 +127,7 @@ impl Settings {
             chroot: None,
             default_groups: "devel man doc service sources".into(),
             styles_dir: "/etc/pqmake/styles".into(),
+            usr_src_dir: "/usr/src".into(),
             dry_run: false,
             keep_going: false,
             quiet: false,
@@ -154,6 +159,7 @@ impl Settings {
                 "CXXFLAGS" => self.cxxflags = value,
                 "PKGMK_GROUPS" => self.default_groups = value,
                 "STYLES_DIR" => self.styles_dir = value.into(),
+                "USR_SRC_DIR" => self.usr_src_dir = value.into(),
                 "CHROOT" => self.chroot = Some(value.into()).filter(|p: &PathBuf| !p.as_os_str().is_empty()),
                 _ => eprintln!("Warning: ignoring unknown setting {key} in {}", path.display()),
             }
@@ -307,7 +313,7 @@ impl Pqmake {
             .context("unable to run bash")?;
         let text = String::from_utf8_lossy(&output.stdout);
         let fields: Vec<&str> = text.lines().collect();
-        if fields.len() != 12 {
+        if fields.len() != 13 {
             bail!("cannot read {}.", pkgfile.display());
         }
         // "-" separates the fields of an archive name: 1.3-20240619 becomes
@@ -329,6 +335,19 @@ impl Pqmake {
             } else {
                 eprintln!(
                     "Warning: {}: group '{group}' is not supported, ignored (known: {}).",
+                    pkgfile.display(),
+                    KNOWN_GROUPS.join(" ")
+                );
+            }
+        }
+        // PKGMK_IGNORE_GROUPS=(sources) removes groups from the default (or
+        // the recipe's) PKGMK_GROUPS
+        for group in fields[12].split_whitespace() {
+            if is_known_group(group) {
+                groups.retain(|g| g != group);
+            } else {
+                eprintln!(
+                    "Warning: {}: PKGMK_IGNORE_GROUPS: unknown group '{group}' (known: {}).",
                     pkgfile.display(),
                     KNOWN_GROUPS.join(" ")
                 );
@@ -510,7 +529,7 @@ impl Pqmake {
     /// Archive of a recipe (or of one of its groups) in the repository.
     pub fn archive_path(&self, name: &str, pkgname: &str) -> PathBuf {
         let r = self.recipe(name);
-        self.s.repo_dir.join(&self.recipe_set[name]).join(format!("{pkgname}-{}-{}.tar.zst", r.version, r.release))
+        self.s.repo_dir.join(&self.recipe_set[name]).join(util::archive_file_name(pkgname, &r.version, &r.release))
     }
 
     /// The main archive is written last: its presence means the build is
@@ -621,7 +640,7 @@ impl Pqmake {
     }
 }
 
-fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
     entries.sort_by(|a, b| util::path_bytes(a).cmp(util::path_bytes(b)));
     entries
@@ -654,7 +673,7 @@ pub fn display_help(prog: &str, config_file: &Path) {
     println!();
     println!("Settings are read from {} (KEY=value lines):", config_file.display());
     println!("  RECIPES_DIR, REPO_DIR, WORK_DIR, SOURCES_DIR, LOG_DIR, MAKEFLAGS, CFLAGS,");
-    println!("  CXXFLAGS, PKGMK_GROUPS, STYLES_DIR, CHROOT");
+    println!("  CXXFLAGS, PKGMK_GROUPS, STYLES_DIR, USR_SRC_DIR, CHROOT");
 }
 
 /// Entry point of the `pqmake` command.

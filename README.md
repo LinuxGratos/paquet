@@ -191,7 +191,13 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
 - Les fichiers `pre-install`, `post-install`, `pre-remove` et `post-remove`
   de la recette deviennent les scripts du paquet, lancés par `paquet`.
 - Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`, `sources`,
-  `locale`) deviennent des sous-paquets `<nom>.<groupe>`.
+  `locale`) deviennent des sous-paquets `<nom>.<groupe>`, d'archive
+  `<nom>-<version>-<release>-<groupe>.tar.zst` ; `PKGMK_IGNORE_GROUPS=(...)`
+  en retire certains pour une recette.
+- Le sous-paquet `<nom>.sources` contient le `Pkgfile`, les scripts, les
+  footprints et toutes les sources de la recette. `pqmake` y reprend une
+  source absente de son cache (installée dans `/usr/src`, ou dans le dépôt)
+  avant de la télécharger.
 - Les dépendances d'exécution sont détectées en lisant les bibliothèques
   dont ont besoin les fichiers ELF, et en cherchant quel paquet les fournit
   (sauf `PKGMK_IGNORE_RUNTIMEDEPS=yes`).
@@ -205,7 +211,7 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
 
 Les réglages viennent de `~/.config/pqmake` (ou `$PQMAKE_CONFIG`) :
 `RECIPES_DIR`, `REPO_DIR`, `WORK_DIR`, `SOURCES_DIR`, `LOG_DIR`, `MAKEFLAGS`,
-`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `STYLES_DIR`, `CHROOT`.
+`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `STYLES_DIR`, `USR_SRC_DIR`, `CHROOT`.
 
 ## Différences avec les scripts bash
 
@@ -219,6 +225,12 @@ Les réglages viennent de `~/.config/pqmake` (ou `$PQMAKE_CONFIG`) :
 - Les liens symboliques absolus (ou passant par `..`) d'une archive sont créés après les autres
   fichiers, pour qu'aucun fichier ne puisse être écrit à travers eux.
 - `paquet --help` fonctionne sans `/etc/pq.conf`.
+- Les archives des sous-paquets s'appellent
+  `<nom>-<version>-<release>-<groupe>.tar.zst` (`nano-9.3-1-devel.tar.zst`
+  pour `nano.devel`). Les scripts bash ne connaissent pas cette forme :
+  `genpqrepo.sh` y lirait un paquet `nano-9.3` de version `1`. `genpqrepo`
+  ignore, avec un avertissement, les archives à l'ancien nom
+  (`nano.devel-9.3-1.tar.zst`) : elles sont à renommer.
 
 ## Tests
 

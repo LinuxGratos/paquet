@@ -95,6 +95,15 @@ pub fn archive_record(repo_dir: &Path, path: &Path) -> Result<Option<Record>> {
         eprintln!("Warning: skipping {} (expected <name>-<version>-<release>.tar.zst)", path.display());
         return Ok(None);
     };
+    if util::is_old_group_archive(base) {
+        eprintln!(
+            "Warning: skipping {} (former name of a subpackage archive; rename it {})",
+            path.display(),
+            util::archive_file_name(&name, version, release)
+        );
+        return Ok(None);
+    }
+    let name = name.as_str();
     if !is_valid_name(name) || !is_valid_version(version) || !is_valid_version(release) {
         eprintln!(
             "Warning: skipping {} (name may only use letters, digits and . _ + -, \

@@ -1400,23 +1400,19 @@ impl Paquet {
     /// Cached archives superseded by a newer cached version of the same
     /// package.
     fn find_old_archives(&self) -> Vec<PathBuf> {
-        let mut versions: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut versions: BTreeMap<String, Vec<(String, PathBuf)>> = BTreeMap::new();
         for path in self.cached_archives() {
             let Some(file) = path.file_name().and_then(|f| f.to_str()) else { continue };
             let Some(base) = file.strip_suffix(".tar.zst") else { continue };
             let Some((name, version, release)) = util::split_archive_base(base) else { continue };
-            if util::is_valid_name(name) {
-                versions.entry(name.to_string()).or_default().push(format!("{version}-{release}"));
+            if util::is_valid_name(&name) {
+                versions.entry(name).or_default().push((format!("{version}-{release}"), path.clone()));
             }
         }
         let mut old = Vec::new();
-        for (name, list) in &versions {
-            let newest = version::newest(list.iter().map(String::as_str)).unwrap_or_default();
-            for v in list {
-                if v != newest {
-                    old.push(self.paths.cache_dir.join(format!("{name}-{v}.tar.zst")));
-                }
-            }
+        for list in versions.values() {
+            let newest = version::newest(list.iter().map(|(v, _)| v.as_str())).unwrap_or_default();
+            old.extend(list.iter().filter(|(v, _)| *v != newest).map(|(_, p)| p.clone()));
         }
         old
     }

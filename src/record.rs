@@ -100,9 +100,10 @@ impl Record {
         self.depends.split_whitespace()
     }
 
-    /// Archive file name: `<name>-<version>-<release>.tar.zst`.
+    /// Archive file name: `<name>-<version>-<release>.tar.zst`, or
+    /// `<name>-<version>-<release>-<group>.tar.zst` for a subpackage.
     pub fn archive_name(&self) -> String {
-        format!("{}-{}-{}.tar.zst", self.name, self.version, self.release)
+        crate::util::archive_file_name(&self.name, &self.version, &self.release)
     }
 }
 

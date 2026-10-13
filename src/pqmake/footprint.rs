@@ -12,7 +12,8 @@
 //!
 //! After each build, the new archives are compared with these files, and
 //! the differences are shown to the packager, who decides whether the recipe
-//! needs fixing. The files are only written when missing, or on request
+//! needs fixing. The `sources` subpackage has no footprint: it holds the
+//! recipe and its sources, whose names change with every version. The files are only written when missing, or on request
 //! (`pqmake --update-footprint`).
 
 use std::collections::{BTreeMap, HashMap};
@@ -22,7 +23,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{KNOWN_GROUPS, Pqmake};
+use super::Pqmake;
+
+/// Groups that have a footprint: all but `sources`.
+const FOOTPRINT_GROUPS: [&str; 5] = ["devel", "doc", "man", "service", "locale"];
 use crate::archive::{self, EntryInfo};
 use crate::util;
 
@@ -220,10 +224,11 @@ pub fn describe(change: &Change) -> String {
 
 impl Pqmake {
     /// Groups of a recipe whose archive is in the repository, for its
-    /// current version: "" for the main package, then the subpackages.
+    /// current version: "" for the main package, then the subpackages
+    /// (`sources` aside).
     fn produced_groups(&self, name: &str) -> Vec<(String, PathBuf)> {
         let main = std::iter::once(String::new());
-        main.chain(KNOWN_GROUPS.iter().map(|g| g.to_string()))
+        main.chain(FOOTPRINT_GROUPS.map(|g| g.to_string()))
             .map(|group| {
                 let pkgname = if group.is_empty() { name.to_string() } else { format!("{name}.{group}") };
                 let archive = self.archive_path(name, &pkgname);
@@ -259,17 +264,18 @@ impl Pqmake {
         Ok(())
     }
 
-    /// Compares the new archives of a recipe with its footprints, and shows
-    /// the differences. Missing footprints are written. Never fails the
-    /// build: the packager decides what to do.
-    pub fn check_footprints(&mut self, name: &str) {
+    /// Compares the new archives of a recipe, as (group, archive), with its
+    /// footprints, and shows the differences. Missing footprints are
+    /// written. Never fails the build: the packager decides what to do.
+    pub fn check_footprints(&mut self, name: &str, produced: &[(String, PathBuf)]) {
         let names = self.names();
         let mut changed = false;
-        for (group, archive) in self.produced_groups(name) {
+        for (group, archive) in produced {
+            let (group, archive) = (group.as_str(), archive.as_path());
             let pkgname = if group.is_empty() { name.to_string() } else { format!("{name}.{group}") };
-            let (file, shown) = self.footprint_file(name, &group);
+            let (file, shown) = self.footprint_file(name, group);
             let result = (|| -> Result<bool> {
-                let new = of_archive(&archive, &names)?;
+                let new = of_archive(archive, &names)?;
                 let old = match fs::read_to_string(&file) {
                     Ok(content) => parse(&content),
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -293,8 +299,7 @@ impl Pqmake {
                 Err(err) => eprintln!("Warning: footprint of {pkgname} not checked: {err:#}"),
             }
         }
-        let produced: Vec<String> = self.produced_groups(name).into_iter().map(|(g, _)| g).collect();
-        for group in KNOWN_GROUPS.iter().filter(|g| !produced.iter().any(|p| p == *g)) {
+        for group in FOOTPRINT_GROUPS.iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
             let (file, shown) = self.footprint_file(name, group);
             if file.is_file() {
                 println!("==> {name}.{group} is no longer produced ({shown})");
@@ -331,7 +336,7 @@ impl Pqmake {
                 updated = true;
             }
         }
-        for group in KNOWN_GROUPS.iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
+        for group in FOOTPRINT_GROUPS.iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
             let (file, shown) = self.footprint_file(name, group);
             if file.is_file() {
                 fs::remove_file(&file).with_context(|| format!("unable to remove {}", file.display()))?;
@@ -394,5 +399,16 @@ mod tests {
             ]
         );
         assert!(diff(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn footprint_groups() {
+        use crate::pqmake::KNOWN_GROUPS;
+        let mut all: Vec<&str> = FOOTPRINT_GROUPS.to_vec();
+        all.push("sources");
+        all.sort();
+        let mut known = KNOWN_GROUPS.to_vec();
+        known.sort();
+        assert_eq!(all, known);
     }
 }
