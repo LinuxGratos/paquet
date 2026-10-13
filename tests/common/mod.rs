@@ -81,7 +81,7 @@ impl Env {
         fs::write(stage.join(".META"), meta).unwrap();
         let dir = self.repo_dir().join(folder);
         fs::create_dir_all(&dir).unwrap();
-        let archive = dir.join(format!("{name}-{version}-1.tar.zst"));
+        let archive = dir.join(paquet::util::archive_file_name(name, version, "1"));
         paquet::archive::create(&stage, &archive, false).unwrap();
         archive
     }

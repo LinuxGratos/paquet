@@ -17,6 +17,7 @@ lancées en root. Les autres (`-l`, `-s`, `-o`, `-Q`, `-I`, `-F`,
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
 PARALLEL_DOWNLOADS=4
+GROUP="fr"
 ```
 
 | Réglage | Rôle | Par défaut |
@@ -24,6 +25,7 @@ PARALLEL_DOWNLOADS=4
 | `MIRROR` | adresse du miroir : `https://`, `http://` ou `file://` | (obligatoire) |
 | `BRANCH` | branche suivie (`stable`, `testing`...) | `stable` |
 | `PARALLEL_DOWNLOADS` | nombre de téléchargements simultanés (1 à 16) | `4` |
+| `GROUP` | langue ou groupe installé avec chaque paquet ; répétable (voir [Langues et sous-paquets](#langues-et-sous-paquets)) | aucun : l'anglais seul |
 
 Les paquets sont cherchés dans `$MIRROR/$BRANCH/<architecture>/`, où
 l'architecture est celle de `uname -m` (`x86_64`, `aarch64`...). Avec la
@@ -194,6 +196,42 @@ Un paquet dont dépend un autre paquet installé ne peut pas être supprimé :
 `paquet` liste les paquets qui en ont besoin. Les fichiers de `/etc` et de
 `/var/lib/pq` sont toujours conservés ; les répertoires ne sont supprimés que
 s'ils sont vides.
+
+### Langues et sous-paquets
+
+Les traductions d'un paquet sont dans des sous-paquets, un par langue :
+`nano.fr`, `nano.de`... Le paquet `nano` lui-même ne contient que l'anglais.
+Pour avoir ses langues, on les déclare dans `/etc/pq.conf`, une ligne par
+langue (ou plusieurs langues sur une ligne) :
+
+```sh
+GROUP="fr"
+GROUP="it"
+```
+
+`GROUP` accepte aussi les autres groupes de sous-paquets : `GROUP="man"`
+installe les pages de manuel (`nano.man`) avec chaque paquet, `GROUP="doc"`
+la documentation...
+
+Avec `GROUP="fr"` :
+
+- `paquet -i nano` installe aussi `nano.fr`, et le paquet français de
+  chaque dépendance installée (`ncurses.fr`...), quand ils existent ;
+- `paquet -u` installe ceux qui manquent : après l'ajout d'une ligne
+  `GROUP`, ou quand une nouvelle version apporte une traduction ;
+
+  ```text
+  Packages to add for GROUP fr: nano.fr ncurses.fr
+  Download size: 412.0 KiB
+  Do you want to upgrade these packages? [Y/n]
+  ```
+- `paquet -r nano` retire aussi `nano.fr` ;
+- ces sous-paquets sont installés automatiquement (état `A`) et ne sont
+  jamais orphelins tant que leur paquet est là. Après le retrait d'une ligne
+  `GROUP`, ils le deviennent : `paquet autoremove` les supprime.
+
+Sans aucune ligne `GROUP`, seul l'anglais est installé. Un sous-paquet peut
+toujours être installé à la main : `paquet -i nano.de`.
 
 ### Les dépendances devenues inutiles
 
@@ -398,7 +436,7 @@ le miroir ou le trafic réseau peut faire installer ce qu'il veut.
 
 | Fichier | Contenu |
 |---|---|
-| `/etc/pq.conf` | `MIRROR`, `BRANCH` et `PARALLEL_DOWNLOADS` (variable `PQ_CONFIG` pour un autre chemin) |
+| `/etc/pq.conf` | `MIRROR`, `BRANCH`, `PARALLEL_DOWNLOADS` et `GROUP` (variable `PQ_CONFIG` pour un autre chemin) |
 | `/etc/pq/keys/*.pub` | clés publiques de confiance (variable `PQ_KEYS_DIR`) |
 | `/var/lib/pq/PQREPO` | index du dépôt, tel que récupéré |
 | `/var/lib/pq/PQREPOSTATE` | état de chaque paquet connu |

@@ -365,3 +365,59 @@ fn parallel_downloads_over_http() {
     let r = env.pq_env(&["-l", "-y"], None, &no_proxy);
     assert!(!r.ok() && r.stderr.contains("-y only applies to"), "{}", r.all());
 }
+
+#[test]
+fn configured_groups_come_with_their_packages() {
+    let env = Env::new();
+    env.package("base", "lib", "1.0", &[("usr/lib/lib.so", "lib")], "");
+    env.package("base", "lib.fr", "1.0", &[("usr/share/locale/fr/lib.mo", "fr")], "lib");
+    env.package("base", "app", "1.0", &[("usr/bin/app", "app")], "lib");
+    env.package("base", "app.fr", "1.0", &[("usr/share/locale/fr/app.mo", "fr")], "app");
+    env.package("base", "app.de", "1.0", &[("usr/share/locale/de/app.mo", "de")], "app");
+    env.package("base", "app.man", "1.0", &[("usr/share/man/man1/app.1", "man")], "app");
+    env.index(None);
+    let conf = |extra: &str| {
+        let mirror = env.path("mirror").display().to_string();
+        fs::write(env.path("pq.conf"), format!("MIRROR=file://{mirror}\nBRANCH=stable\n{extra}")).unwrap();
+    };
+    assert!(env.pq(&["-S", "--nosign"]).ok());
+
+    // Without GROUP, English only: no subpackage
+    let r = env.pq(&["-i", "app"]);
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!((env.status("app"), env.status("lib"), env.status("app.fr")), ("I".into(), "A".into(), "N".into()));
+
+    // GROUP lines: -u adds what installed packages lack
+    conf("GROUP=\"fr\"\nGROUP=\"man\"\n");
+    let r = env.pq(&["-u", "-y"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("Packages to add for GROUP fr man: app.fr app.man lib.fr\n"), "{}", r.stdout);
+    for p in ["app.fr", "app.man", "lib.fr"] {
+        assert_eq!(env.status(p), "A", "{p}");
+    }
+    assert_eq!(env.status("app.de"), "N");
+    assert!(env.rootpath("usr/share/locale/fr/app.mo").is_file());
+    assert_eq!(env.pq(&["-o"]).stdout, "No orphan packages.\n");
+
+    // They go with their package; lib.fr stays while lib does
+    let r = env.pq(&["-r", "app"]);
+    assert!(r.ok(), "{}", r.all());
+    for p in ["app", "app.fr", "app.man"] {
+        assert_eq!(env.status(p), "N", "{p}");
+    }
+    assert!(r.stdout.contains("2 orphan package(s) left: lib lib.fr."), "{}", r.stdout);
+    let r = env.pq(&["autoremove", "-y"]);
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!((env.status("lib"), env.status("lib.fr")), ("N".into(), "N".into()));
+
+    // -i brings them at once, the dependencies' too
+    let r = env.pq(&["-i", "app"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("Installing app and its dependencies: lib app lib.fr app.fr app.man\n"), "{}", r.stdout);
+
+    // A group no longer configured leaves orphans
+    conf("GROUP=fr\nGROUP=Français\n");
+    let r = env.pq(&["-o"]);
+    assert_eq!(r.stdout, "app.man\n", "{}", r.all());
+    assert!(r.stderr.contains("GROUP: 'Français' is neither a language"), "{}", r.stderr);
+}

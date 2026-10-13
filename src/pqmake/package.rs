@@ -48,7 +48,6 @@ pub fn group_paths(group: &str, root: &Path) -> Vec<String> {
         // Not split off the package: built from the recipe (see
         // Pqmake::write_sources)
         "sources" => Vec::new(),
-        "locale" => existing(&["usr/share/locale"]),
         _ => Vec::new(),
     }
 }
@@ -71,6 +70,49 @@ pub fn split_group(group: &str, root: &Path, dest: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Directories holding one subdirectory per locale (`usr/share/locale/fr`,
+/// `usr/share/man/fr`...), split into one subpackage per language.
+pub const LOCALE_DIRS: [&str; 3] = ["usr/share/locale", "usr/share/man", "usr/share/help"];
+
+/// Moves the translations of `root` to `<dest>/<language>/`, one tree per
+/// base language (`fr_CA` goes with `fr`). English stays, as do the
+/// `ignored` languages. Returns the languages found, sorted.
+pub fn split_languages(root: &Path, dest: &Path, ignored: &[String]) -> io::Result<Vec<String>> {
+    let mut languages: Vec<String> = Vec::new();
+    for dir in LOCALE_DIRS {
+        let mut entries: Vec<String> = fs::read_dir(root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            let Some(lang) = util::locale_language(&entry) else { continue };
+            if lang == "en" || ignored.iter().any(|i| i == lang) {
+                continue;
+            }
+            let target = dest.join(lang).join(dir).join(&entry);
+            fs::create_dir_all(target.parent().unwrap_or(dest))?;
+            move_tree(&root.join(dir).join(&entry), &target)?;
+            if !languages.iter().any(|l| l == lang) {
+                languages.push(lang.to_string());
+            }
+        }
+        // Directories left empty by the move
+        let mut parent = Some(Path::new(dir));
+        while let Some(p) = parent.filter(|p| !p.as_os_str().is_empty()) {
+            if fs::remove_dir(root.join(p)).is_err() {
+                break;
+            }
+            parent = p.parent();
+        }
+    }
+    languages.sort();
+    Ok(languages)
 }
 
 /// Words of a list without repetitions, in order.
@@ -244,6 +286,16 @@ impl Pqmake {
         let mut packages: Vec<String> = Vec::new();
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut depends: Vec<Vec<String>> = Vec::new();
+        // Translations first, so that translated manual pages go with their
+        // language rather than with the man group
+        let languages = work.join("languages");
+        let found =
+            split_languages(pkg, &languages, &r.ignored_languages).context("unable to split the translations")?;
+        for lang in found {
+            packages.push(format!("{name}.{lang}"));
+            dirs.push(languages.join(&lang));
+            depends.push(vec![name.to_string()]);
+        }
         for group in r.groups.iter().filter(|g| *g != "sources") {
             let dest = work.join(group);
             fs::create_dir_all(&dest)?;
@@ -326,10 +378,8 @@ impl Pqmake {
 
         // A subpackage this build no longer produces must not stay next to
         // the new main package (rebuild of the same version)
-        for group in super::KNOWN_GROUPS {
-            let pkgname = format!("{name}.{group}");
-            let stale = self.archive_path(name, &pkgname);
-            if !packages.contains(&pkgname) && stale.is_file() {
+        for (group, stale) in self.existing_subpackages(name) {
+            if !packages.contains(&format!("{name}.{group}")) {
                 fs::remove_file(&stale).with_context(|| format!("unable to remove {}", stale.display()))?;
                 println!("  {} removed (no longer produced)", stale.display());
             }

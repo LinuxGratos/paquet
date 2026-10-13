@@ -95,6 +95,8 @@ plus dans le dépôt.
 MIRROR="https://miroir.exemple.org/great-os"
 BRANCH="stable"
 PARALLEL_DOWNLOADS=4      # facultatif : téléchargements simultanés (1 à 16)
+GROUP="fr"                # facultatif : sous-paquets installés avec chaque paquet
+GROUP="man"               # (une ligne par groupe ; sans GROUP, l'anglais seul)
 ```
 
 Les paquets sont pris dans `$MIRROR/$BRANCH/$(uname -m)/`. Les URL `http://`,
@@ -190,10 +192,14 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
   les différences, setuid compris, sont signalées au packageur.
 - Les fichiers `pre-install`, `post-install`, `pre-remove` et `post-remove`
   de la recette deviennent les scripts du paquet, lancés par `paquet`.
-- Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`, `sources`,
-  `locale`) deviennent des sous-paquets `<nom>.<groupe>`, d'archive
+- Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`,
+  `sources`) deviennent des sous-paquets `<nom>.<groupe>`, d'archive
   `<nom>-<version>-<release>-<groupe>.tar.zst` ; `PKGMK_IGNORE_GROUPS=(...)`
   en retire certains pour une recette.
+- Les traductions sont séparées automatiquement, un sous-paquet par langue
+  (`nano.fr` avec `fr`, `fr_CA`...) ; l'anglais reste dans le paquet
+  principal. `GROUP=fr` dans `/etc/pq.conf` les fait installer avec chaque
+  paquet.
 - Le sous-paquet `<nom>.sources` contient le `Pkgfile`, les scripts, les
   footprints et toutes les sources de la recette. `pqmake` y reprend une
   source absente de son cache (installée dans `/usr/src`, ou dans le dépôt)

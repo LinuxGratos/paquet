@@ -26,7 +26,8 @@ use crate::util::{self, is_valid_name, is_valid_version};
 use crate::{config, signals};
 
 /// Subpackages a recipe can split off with `PKGMK_GROUPS`: `<name>.<group>`.
-pub const KNOWN_GROUPS: [&str; 6] = util::PACKAGE_GROUPS;
+/// Translations always go to one subpackage per language, `<name>.<language>`.
+pub const KNOWN_GROUPS: [&str; 5] = util::PACKAGE_GROUPS;
 
 pub fn is_known_group(group: &str) -> bool {
     KNOWN_GROUPS.contains(&group)
@@ -178,6 +179,8 @@ pub struct Recipe {
     pub run: Vec<String>,
     pub run_devel: Vec<String>,
     pub groups: Vec<String>,
+    /// Languages kept in the main package (`PKGMK_IGNORE_GROUPS=(de)`)
+    pub ignored_languages: Vec<String>,
     pub sources: Vec<String>,
     pub no_rtdeps: bool,
     /// Build style file, for a recipe without build() function
@@ -341,13 +344,16 @@ impl Pqmake {
             }
         }
         // PKGMK_IGNORE_GROUPS=(sources) removes groups from the default (or
-        // the recipe's) PKGMK_GROUPS
+        // the recipe's) PKGMK_GROUPS; a language stays in the main package
+        let mut ignored_languages = Vec::new();
         for group in fields[12].split_whitespace() {
             if is_known_group(group) {
                 groups.retain(|g| g != group);
+            } else if util::is_language(group) {
+                ignored_languages.push(group.to_string());
             } else {
                 eprintln!(
-                    "Warning: {}: PKGMK_IGNORE_GROUPS: unknown group '{group}' (known: {}).",
+                    "Warning: {}: PKGMK_IGNORE_GROUPS: unknown group '{group}' (known: {}, or a language).",
                     pkgfile.display(),
                     KNOWN_GROUPS.join(" ")
                 );
@@ -365,6 +371,7 @@ impl Pqmake {
                 run: words(fields[5]),
                 run_devel: words(fields[6]),
                 groups,
+                ignored_languages,
                 sources: words(fields[8]),
                 no_rtdeps: fields[9] == "yes",
                 style,
@@ -409,8 +416,8 @@ impl Pqmake {
         if self.recipe_path.contains_key(dep) {
             return Some(dep.to_string());
         }
-        let (base, group) = dep.rsplit_once('.')?;
-        (self.recipe_path.contains_key(base) && is_known_group(group)).then(|| base.to_string())
+        let (base, _) = util::split_group(dep)?;
+        self.recipe_path.contains_key(base).then(|| base.to_string())
     }
 
     /// Every recipe the targets need, at build time or at run time.
@@ -530,6 +537,22 @@ impl Pqmake {
     pub fn archive_path(&self, name: &str, pkgname: &str) -> PathBuf {
         let r = self.recipe(name);
         self.s.repo_dir.join(&self.recipe_set[name]).join(util::archive_file_name(pkgname, &r.version, &r.release))
+    }
+
+    /// Subpackages of a recipe's current version in the repository, as
+    /// (group or language, archive).
+    pub fn existing_subpackages(&self, name: &str) -> Vec<(String, PathBuf)> {
+        let r = self.recipe(name);
+        let dir = self.s.repo_dir.join(&self.recipe_set[name]);
+        let prefix = format!("{name}-{}-{}-", r.version, r.release);
+        util::files_with_suffix(&dir, ".tar.zst")
+            .into_iter()
+            .filter_map(|path| {
+                let file = path.file_name()?.to_str()?;
+                let group = file.strip_prefix(&prefix)?.strip_suffix(".tar.zst")?;
+                util::is_package_group(group).then(|| (group.to_string(), path.clone()))
+            })
+            .collect()
     }
 
     /// The main archive is written last: its presence means the build is

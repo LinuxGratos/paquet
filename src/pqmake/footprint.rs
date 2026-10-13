@@ -25,8 +25,6 @@ use anyhow::{Context, Result, bail};
 
 use super::Pqmake;
 
-/// Groups that have a footprint: all but `sources`.
-const FOOTPRINT_GROUPS: [&str; 5] = ["devel", "doc", "man", "service", "locale"];
 use crate::archive::{self, EntryInfo};
 use crate::util;
 
@@ -227,14 +225,20 @@ impl Pqmake {
     /// current version: "" for the main package, then the subpackages
     /// (`sources` aside).
     fn produced_groups(&self, name: &str) -> Vec<(String, PathBuf)> {
-        let main = std::iter::once(String::new());
-        main.chain(FOOTPRINT_GROUPS.map(|g| g.to_string()))
-            .map(|group| {
-                let pkgname = if group.is_empty() { name.to_string() } else { format!("{name}.{group}") };
-                let archive = self.archive_path(name, &pkgname);
-                (group, archive)
-            })
-            .filter(|(_, archive)| archive.is_file())
+        let main = (String::new(), self.archive_path(name, name));
+        let mut groups: Vec<(String, PathBuf)> = std::iter::once(main).filter(|(_, a)| a.is_file()).collect();
+        groups.extend(self.existing_subpackages(name).into_iter().filter(|(g, _)| g != "sources"));
+        groups
+    }
+
+    /// Footprints of subpackages (`.footprint.<group>`) in the recipe
+    /// directory, by group.
+    fn subpackage_footprints(&self, name: &str) -> Vec<String> {
+        let dir = self.recipe_path[name].parent().unwrap_or(Path::new("."));
+        super::read_dir_sorted(dir)
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str()?.strip_prefix(".footprint.").map(String::from))
+            .filter(|g| g != "sources" && util::is_package_group(g))
             .collect()
     }
 
@@ -299,7 +303,7 @@ impl Pqmake {
                 Err(err) => eprintln!("Warning: footprint of {pkgname} not checked: {err:#}"),
             }
         }
-        for group in FOOTPRINT_GROUPS.iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
+        for group in self.subpackage_footprints(name).iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
             let (file, shown) = self.footprint_file(name, group);
             if file.is_file() {
                 println!("==> {name}.{group} is no longer produced ({shown})");
@@ -336,7 +340,7 @@ impl Pqmake {
                 updated = true;
             }
         }
-        for group in FOOTPRINT_GROUPS.iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
+        for group in self.subpackage_footprints(name).iter().filter(|g| !produced.iter().any(|(p, _)| p == *g)) {
             let (file, shown) = self.footprint_file(name, group);
             if file.is_file() {
                 fs::remove_file(&file).with_context(|| format!("unable to remove {}", file.display()))?;
@@ -399,16 +403,5 @@ mod tests {
             ]
         );
         assert!(diff(&old, &old).is_empty());
-    }
-
-    #[test]
-    fn footprint_groups() {
-        use crate::pqmake::KNOWN_GROUPS;
-        let mut all: Vec<&str> = FOOTPRINT_GROUPS.to_vec();
-        all.push("sources");
-        all.sort();
-        let mut known = KNOWN_GROUPS.to_vec();
-        known.sort();
-        assert_eq!(all, known);
     }
 }

@@ -67,17 +67,60 @@ pub fn is_valid_version(version: &str) -> bool {
 }
 
 /// Subpackages a recipe can split off: `<name>.<group>`, whose archive is
-/// `<name>-<version>-<release>-<group>.tar.zst`.
-pub const PACKAGE_GROUPS: [&str; 6] = ["devel", "doc", "man", "service", "sources", "locale"];
+/// `<name>-<version>-<release>-<group>.tar.zst`. Translations also go to
+/// one subpackage per language, `<name>.<language>` (see [`is_language`]).
+pub const PACKAGE_GROUPS: [&str; 5] = ["devel", "doc", "man", "service", "sources"];
+
+/// Language codes, as in the names of locale directories: two or three
+/// lowercase letters (`fr`, `pt`, `ast`).
+pub fn is_language(code: &str) -> bool {
+    (2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// Base language of a locale directory: `fr_CA`, `sr@latin` and `de.UTF-8`
+/// give `fr`, `sr` and `de`. None for other names (`C`, `man1`...).
+pub fn locale_language(dir: &str) -> Option<&str> {
+    let end = dir.find(['_', '@', '.']).unwrap_or(dir.len());
+    let (code, mut rest) = dir.split_at(end);
+    if !is_language(code) {
+        return None;
+    }
+    // Territory or script: _CA, _419, _Hans
+    if let Some(after) = rest.strip_prefix('_') {
+        let end = after.find(['@', '.']).unwrap_or(after.len());
+        let (territory, tail) = after.split_at(end);
+        let b = territory.as_bytes();
+        let valid = (b.len() == 2 && b.iter().all(u8::is_ascii_uppercase))
+            || (b.len() == 3 && b.iter().all(u8::is_ascii_digit))
+            || (b.len() == 4 && b[0].is_ascii_uppercase() && b[1..].iter().all(u8::is_ascii_lowercase));
+        if !valid {
+            return None;
+        }
+        rest = tail;
+    }
+    // Then a charset (.UTF-8) or a modifier (@latin)
+    (rest.is_empty() || rest.len() > 1).then_some(code)
+}
+
+/// True for the group part of a subpackage name: a known group or a
+/// language.
+pub fn is_package_group(group: &str) -> bool {
+    PACKAGE_GROUPS.contains(&group) || is_language(group)
+}
+
+/// Splits the name of a subpackage: `nano.devel` gives (nano, devel),
+/// `nano.fr` gives (nano, fr). None for other packages.
+pub fn split_group(name: &str) -> Option<(&str, &str)> {
+    name.rsplit_once('.').filter(|(base, group)| !base.is_empty() && is_package_group(group))
+}
 
 /// Archive file name of a package: `nano-8.0-1.tar.zst`, and for the
-/// subpackage `nano.devel`, `nano-8.0-1-devel.tar.zst`.
+/// subpackages `nano.devel` and `nano.fr`, `nano-8.0-1-devel.tar.zst` and
+/// `nano-8.0-1-fr.tar.zst`.
 pub fn archive_file_name(name: &str, version: &str, release: &str) -> String {
-    match name.rsplit_once('.') {
-        Some((base, group)) if !base.is_empty() && PACKAGE_GROUPS.contains(&group) => {
-            format!("{base}-{version}-{release}-{group}.tar.zst")
-        }
-        _ => format!("{name}-{version}-{release}.tar.zst"),
+    match split_group(name) {
+        Some((base, group)) => format!("{base}-{version}-{release}-{group}.tar.zst"),
+        None => format!("{name}-{version}-{release}.tar.zst"),
     }
 }
 
@@ -92,7 +135,7 @@ pub fn split_archive_base(base: &str) -> Option<(String, &str, &str)> {
         (!name.is_empty()).then(|| (name.to_string(), version, release))
     }
     if let Some((rest, group)) = base.rsplit_once('-') {
-        if PACKAGE_GROUPS.contains(&group) {
+        if is_package_group(group) {
             if let Some((name, version, release)) = split(rest) {
                 return Some((format!("{name}.{group}"), version, release));
             }
@@ -105,9 +148,9 @@ pub fn split_archive_base(base: &str) -> Option<(String, &str, &str)> {
 /// (`nano.devel-8.0-1`), which no longer matches its index record.
 pub fn is_old_group_archive(base: &str) -> bool {
     match split_archive_base(base) {
-        Some((name, _, _)) => {
+        Some((name, version, release)) => {
             name.rsplit_once('.').is_some_and(|(_, g)| PACKAGE_GROUPS.contains(&g))
-                && !PACKAGE_GROUPS.iter().any(|g| base.ends_with(&format!("-{g}")))
+                && base == format!("{name}-{version}-{release}")
         }
         None => false,
     }
@@ -415,9 +458,37 @@ mod tests {
         assert_eq!(archive_file_name("nano", "8.0", "1"), "nano-8.0-1.tar.zst");
         assert_eq!(archive_file_name("nano.devel", "8.0", "1"), "nano-8.0-1-devel.tar.zst");
         assert_eq!(archive_file_name("python3.11", "3.11.9", "1"), "python3.11-3.11.9-1.tar.zst");
+        assert_eq!(split("nano-8.0-1-fr"), parts("nano.fr", "8.0", "1"));
+        assert_eq!(archive_file_name("nano.fr", "8.0", "1"), "nano-8.0-1-fr.tar.zst");
+        assert_eq!(split("hunspell-fr-1.0-1"), parts("hunspell-fr", "1.0", "1"));
         assert!(is_old_group_archive("nano.devel-8.0-1"));
         assert!(!is_old_group_archive("nano-8.0-1-devel"));
         assert!(!is_old_group_archive("nano-8.0-1"));
+    }
+
+    #[test]
+    fn languages() {
+        for (dir, lang) in [
+            ("fr", "fr"),
+            ("fr_CA", "fr"),
+            ("sr@latin", "sr"),
+            ("de.UTF-8", "de"),
+            ("ast", "ast"),
+            ("es_419", "es"),
+            ("zh_Hans", "zh"),
+            ("ca_ES@valencia", "ca"),
+        ] {
+            assert_eq!(locale_language(dir), Some(lang), "{dir}");
+        }
+        for dir in
+            ["C", "POSIX", "man1", "locale.alias", "all_languages", "kf5_all_languages", "f", "fr_", "fr_ca", "French"]
+        {
+            assert_eq!(locale_language(dir), None, "{dir}");
+        }
+        assert_eq!(split_group("nano.fr"), Some(("nano", "fr")));
+        assert_eq!(split_group("nano.devel"), Some(("nano", "devel")));
+        assert_eq!(split_group("python3.11"), None);
+        assert_eq!(split_group(".fr"), None);
     }
 
     #[test]

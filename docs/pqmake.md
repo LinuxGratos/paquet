@@ -78,7 +78,7 @@ build() {
 | `run_devel` | dépendances du sous-paquet `.devel` |
 | `source` | sources : URL ou fichiers du répertoire de la recette |
 | `PKGMK_GROUPS` | sous-paquets à séparer (voir plus bas) |
-| `PKGMK_IGNORE_GROUPS` | sous-paquets à ne pas produire, parmi ceux par défaut (`PKGMK_IGNORE_GROUPS=(sources)`) |
+| `PKGMK_IGNORE_GROUPS` | sous-paquets à ne pas produire, parmi ceux par défaut (`PKGMK_IGNORE_GROUPS=(sources)`), ou langues à garder dans le paquet principal (`de`) |
 | `build` | style de construction, pour une recette sans fonction `build()` (voir plus bas) |
 | `PKGMK_IGNORE_RUNTIMEDEPS=yes` | ne pas détecter les dépendances à l'exécution |
 
@@ -243,16 +243,42 @@ recette :
   autres groupes par défaut restent. Les fichiers d'un groupe retiré restent
   dans le paquet principal.
 
+Les traductions sont toujours séparées par langue, en plus de ces groupes
+(voir [Les traductions](#les-traductions)).
+
 | Groupe | Fichiers déplacés dans `<nom>.<groupe>` | Dépend de |
 |---|---|---|
 | `devel` | `usr/include`, `usr/lib/pkgconfig`, `usr/share/pkgconfig`, `usr/lib/cmake`, `usr/share/aclocal`, et dans `usr/lib` : `*.a`, `*.la` et les liens `*.so` | `<nom>` et `run_devel` |
 | `doc` | `usr/share/doc`, `usr/share/gtk-doc`, `usr/share/info` | |
 | `man` | `usr/share/man` | |
 | `service` | `etc/rc.d`, `lib/systemd/system`, `usr/lib/systemd/system` | `<nom>` |
-| `locale` | `usr/share/locale` | |
 | `sources` | rien n'est déplacé : voir ci-dessous | |
 
 Un groupe sans fichier ne produit pas d'archive.
+
+#### Les traductions
+
+`pqmake` sépare automatiquement les traductions, un sous-paquet par langue
+de base : `nano.fr` contient `fr`, `fr_CA`, `fr_BE`..., `nano.pt` contient
+`pt` et `pt_BR`. Sont concernés les sous-répertoires de langue de :
+
+- `usr/share/locale/` (les fichiers `.mo` de gettext) ;
+- `usr/share/man/` (les pages de manuel traduites : `usr/share/man/fr/man1/`) ;
+- `usr/share/help/` (l'aide des applications GNOME).
+
+L'anglais (`en`, `en_GB`, `en@quot`...) reste dans le paquet principal, avec
+tout ce qui n'est pas une langue (`usr/share/help/C`, `locale.alias`) : sans
+autre réglage, un système n'installe que l'anglais. Les traductions passent
+avant le groupe `man` : `usr/share/man/fr/` va dans `nano.fr`, pas dans
+`nano.man`.
+
+Chaque paquet de langue dépend du paquet principal, s'appelle
+`<nom>-<version>-<release>-<langue>.tar.zst` et a son footprint
+(`.footprint.fr`). Une recette garde une langue dans son paquet principal
+avec `PKGMK_IGNORE_GROUPS=(de)`.
+
+C'est à l'installation que l'utilisateur choisit ses langues (`GROUP=fr`
+dans `/etc/pq.conf`, voir [Utilisation](utilisation.md#langues-et-sous-paquets)).
 
 #### Le paquet des sources
 

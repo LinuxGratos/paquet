@@ -40,8 +40,8 @@ exemple `/srv/great-os/stable/x86_64`.
 Une archive s'appelle `<nom>-<version>-<release>.tar.zst`, ou
 `<nom>-<version>-<release>-<groupe>.tar.zst` pour un sous-paquet
 (`libsalut-1.2-1-devel.tar.zst` est l'archive du paquet `libsalut.devel`).
-Les groupes reconnus sont `devel`, `doc`, `man`, `service`, `sources` et
-`locale`. C'est une archive tar
+Les groupes sont `devel`, `doc`, `man`, `service` et `sources`, ou une
+langue (`libsalut-1.2-1-fr.tar.zst` pour `libsalut.fr`). C'est une archive tar
 compressée avec zstd, qui contient les fichiers du paquet relativement à `/`,
 un fichier `.META` à la racine et, facultativement, les scripts du paquet
 (`.PRE-INSTALL`, `.POST-INSTALL`, `.PRE-REMOVE`, `.POST-REMOVE`, voir

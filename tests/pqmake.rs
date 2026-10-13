@@ -560,3 +560,91 @@ fn sources_packages() {
     let r = env.index(None);
     assert!(r.stderr.contains("former name of a subpackage archive; rename it old-1.0-1-devel.tar.zst"), "{}", r.all());
 }
+
+#[test]
+fn translations_are_split_by_language() {
+    let env = Env::new();
+    let polyglot = |release: &str, extra: &str| {
+        recipe(
+            &env,
+            "base",
+            "polyglot",
+            &format!(
+                r#"name=polyglot
+version=1
+release={release}
+description="Speaks"
+{extra}
+build() {{
+    mkdir -p "$PKG/usr/bin" "$PKG/usr/share/man/man1" "$PKG/usr/share/man/fr/man1"
+    echo program > "$PKG/usr/bin/polyglot"
+    for d in fr fr_CA de en_GB en@quot pt_BR; do
+        mkdir -p "$PKG/usr/share/locale/$d/LC_MESSAGES"
+        echo $d > "$PKG/usr/share/locale/$d/LC_MESSAGES/polyglot.mo"
+    done
+    echo alias > "$PKG/usr/share/locale/locale.alias"
+    echo man > "$PKG/usr/share/man/man1/polyglot.1"
+    echo page > "$PKG/usr/share/man/fr/man1/polyglot.1"
+    mkdir -p "$PKG/usr/share/help/C" "$PKG/usr/share/help/de"
+    echo help > "$PKG/usr/share/help/C/index.page"
+    echo hilfe > "$PKG/usr/share/help/de/index.page"
+}}
+"#
+            ),
+        );
+    };
+    polyglot("1", "");
+    let r = pqmake(&env, &["-q", "polyglot"]);
+    assert!(r.ok(), "{}", r.all());
+    let repo = env.repo_dir().join("base");
+    let files = |archive: &str| -> Vec<String> {
+        paquet::archive::list(&repo.join(archive))
+            .unwrap()
+            .iter()
+            .filter(|e| !e.is_dir && !e.name.starts_with(b"."))
+            .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+            .collect()
+    };
+    // English stays in the main package
+    assert_eq!(
+        files("polyglot-1-1.tar.zst"),
+        [
+            "usr/bin/polyglot",
+            "usr/share/help/C/index.page",
+            "usr/share/locale/en@quot/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/en_GB/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/locale.alias",
+        ]
+    );
+    // One package per base language, translated manual pages included
+    assert_eq!(
+        files("polyglot-1-1-fr.tar.zst"),
+        [
+            "usr/share/locale/fr/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/fr_CA/LC_MESSAGES/polyglot.mo",
+            "usr/share/man/fr/man1/polyglot.1",
+        ]
+    );
+    assert_eq!(
+        files("polyglot-1-1-de.tar.zst"),
+        ["usr/share/help/de/index.page", "usr/share/locale/de/LC_MESSAGES/polyglot.mo"]
+    );
+    assert_eq!(files("polyglot-1-1-pt.tar.zst"), ["usr/share/locale/pt_BR/LC_MESSAGES/polyglot.mo"]);
+    assert_eq!(files("polyglot-1-1-man.tar.zst"), ["usr/share/man/man1/polyglot.1"]);
+    let meta = paquet::archive::read_meta(&repo.join("polyglot-1-1-fr.tar.zst")).unwrap().unwrap();
+    assert_eq!(meta, "Description: Speaks (fr)\nGroups: fr\nSet: base\nDepends: polyglot\n");
+    assert!(env.path("recipes/base/polyglot/.footprint.fr").is_file());
+
+    // A language kept in the main package
+    polyglot("2", "PKGMK_IGNORE_GROUPS=(de)");
+    let r = pqmake(&env, &["-q", "polyglot"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(!repo.join("polyglot-1-2-de.tar.zst").exists());
+    assert!(files("polyglot-1-2.tar.zst").contains(&"usr/share/locale/de/LC_MESSAGES/polyglot.mo".to_string()));
+    assert!(r.stdout.contains("==> polyglot.de is no longer produced (base/polyglot/.footprint.de)"), "{}", r.stdout);
+
+    // The repository index knows the language packages
+    env.index(None);
+    let index = fs::read_to_string(env.repo_dir().join("PQREPO")).unwrap();
+    assert!(index.contains(";polyglot.fr;1;2;"), "{index}");
+}

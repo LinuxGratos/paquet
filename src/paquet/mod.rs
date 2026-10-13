@@ -116,6 +116,9 @@ pub struct Paquet {
     pub noscripts: bool,
     /// `-y`: questions are answered yes.
     pub assume_yes: bool,
+    /// Subpackages installed with every package (`GROUP=` lines of the
+    /// configuration): languages (`fr`) or other groups (`man`).
+    pub groups: Vec<String>,
     /// Simultaneous downloads (`PARALLEL_DOWNLOADS`).
     pub jobs: usize,
     /// Archives downloaded or found in the cache by this command, checked,
@@ -156,6 +159,7 @@ impl Paquet {
             nosign: false,
             noscripts: false,
             assume_yes: false,
+            groups: Vec::new(),
             jobs: download::DEFAULT_JOBS,
             prefetched: HashMap::new(),
             warned: Default::default(),
@@ -394,33 +398,86 @@ impl Paquet {
     /// installed package requires, directly or not.
     pub fn find_orphans(&mut self) -> Vec<String> {
         self.load_state();
+        let state = &self.state;
         let mut reached: HashSet<&str> = HashSet::new();
-        let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
-        for r in self.state.map.values() {
-            if r.status.contains('I') {
-                reached.insert(&r.name);
-                queue.push_back(&r.name);
-            }
-        }
-        while let Some(pkg) = queue.pop_front() {
-            let Some(record) = self.state.get(pkg) else { continue };
-            for dep in record.deps() {
-                let dep = dep_name(dep);
-                if reached.contains(dep) || !self.state.is_installed(dep) {
+        fn visit<'a>(state: &'a Records, roots: Vec<&'a str>, reached: &mut HashSet<&'a str>) {
+            let mut queue: std::collections::VecDeque<&str> = roots.into_iter().collect();
+            while let Some(pkg) = queue.pop_front() {
+                let Some((name, record)) = state.map.get_key_value(pkg) else { continue };
+                if !reached.insert(name.as_str()) {
                     continue;
                 }
-                if let Some((name, _)) = self.state.map.get_key_value(dep) {
-                    reached.insert(name);
-                    queue.push_back(name);
+                for dep in record.deps() {
+                    let dep = dep_name(dep);
+                    if !reached.contains(dep) && state.is_installed(dep) {
+                        queue.push_back(dep);
+                    }
                 }
             }
         }
-        self.state
+        let explicit: Vec<&str> =
+            state.map.values().filter(|r| r.status.contains('I')).map(|r| r.name.as_str()).collect();
+        visit(state, explicit, &mut reached);
+        // The subpackages of the configured groups (nano.fr) stay with their
+        // package, without keeping it: they depend on it
+        let kept: Vec<&str> = state
+            .map
+            .values()
+            .filter(|r| r.is_installed() && !reached.contains(r.name.as_str()))
+            .filter(|r| {
+                util::split_group(&r.name)
+                    .is_some_and(|(base, group)| self.groups.iter().any(|g| g == group) && reached.contains(base))
+            })
+            .map(|r| r.name.as_str())
+            .collect();
+        visit(state, kept, &mut reached);
+        state
             .map
             .values()
             .filter(|r| r.status.contains('A') && !reached.contains(r.name.as_str()))
             .map(|r| r.name.clone())
             .collect()
+    }
+
+    /// Subpackages of the configured groups (`GROUP=`) that go with a
+    /// package and are not installed yet: `nano.fr`, `nano.man`...
+    fn missing_companions(&self, pkg: &str) -> Vec<String> {
+        if util::split_group(pkg).is_some() {
+            return Vec::new();
+        }
+        self.groups
+            .iter()
+            .map(|g| format!("{pkg}.{g}"))
+            .filter(|c| self.repo.get(c).is_some() && !self.state.is_installed(c))
+            .collect()
+    }
+
+    /// Installed subpackages that only make sense with their package, and
+    /// go away with it: the automatically installed `<pkg>.<language>` and
+    /// `<pkg>.<configured group>`.
+    fn installed_companions(&self, pkg: &str) -> Vec<String> {
+        self.state
+            .map
+            .values()
+            .filter(|r| r.is_installed() && r.status.contains('A'))
+            .filter(|r| {
+                util::split_group(&r.name).is_some_and(|(base, group)| {
+                    base == pkg && (util::is_language(group) || self.groups.iter().any(|g| g == group))
+                })
+            })
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    /// Installs the missing subpackages of the configured groups of an
+    /// installed package (`nano.fr` for `GROUP=fr`).
+    fn install_companions(&mut self, pkg: &str) -> Result<()> {
+        for companion in self.missing_companions(pkg) {
+            for p in self.resolve_install(pkg, &[companion.as_str()])? {
+                self.install_package(&p, "A")?;
+            }
+        }
+        Ok(())
     }
 
     /// Orders packages to upgrade so that dependencies come first, following
@@ -852,7 +909,14 @@ impl Paquet {
             bail!("Package {target} is already installed.");
         }
 
-        let order = self.resolve_install("", &[target])?;
+        // With the subpackages of the configured groups (GROUP=fr) of every
+        // package installed
+        let mut order = self.resolve_install("", &[target])?;
+        let companions: Vec<String> = order.iter().flat_map(|p| self.missing_companions(p)).collect();
+        if !companions.is_empty() {
+            let wanted: Vec<&str> = order.iter().chain(&companions).map(String::as_str).collect();
+            order = self.resolve_install("", &wanted)?;
+        }
         if order.len() > 1 {
             println!("Installing {target} and its dependencies: {}", order.join(" "));
         }
@@ -946,6 +1010,10 @@ impl Paquet {
         let order = self.resolve_install(name, &deps)?;
         let mut needed = order.clone();
         needed.push(name.to_string());
+        let companions = self.missing_companions(name);
+        for c in &companions {
+            needed.extend(self.resolve_install(name, &[c.as_str()]).unwrap_or_default());
+        }
         self.download_archives(&needed)?;
         for pkg in &order {
             self.install_package(pkg, "A")
@@ -989,7 +1057,7 @@ impl Paquet {
         self.touch(&stale, Op::Remove);
         println!("{name} upgraded successfully!");
         self.run_late_script(name, &package_scripts, "post-install", &["upgrade", &version, &old_version]);
-        Ok(())
+        self.install_companions(name).with_context(|| format!("installing the subpackages of {name}"))
     }
 
     /// Upgrades every package with an update available, dependencies first.
@@ -1004,16 +1072,26 @@ impl Paquet {
             .filter(|r| r.status.contains('U') && r.is_installed())
             .map(|r| r.name.clone())
             .collect();
-        if candidates.is_empty() {
+        // Subpackages of the configured groups that installed packages lack
+        // (GROUP= added since, or a new translation)
+        let installed: Vec<String> =
+            self.state.map.values().filter(|r| r.is_installed()).map(|r| r.name.clone()).collect();
+        let companions: Vec<String> = installed.iter().flat_map(|p| self.missing_companions(p)).collect();
+        if candidates.is_empty() && companions.is_empty() {
             println!("No packages need upgrading.");
             return Ok(());
         }
         let order = self.upgrade_order(&candidates);
-        println!("Packages available for upgrade (in upgrade order):");
-        let width = order.iter().map(String::len).max().unwrap_or(0);
         let version = |r: Option<&Record>| r.map(|r| format!("{}-{}", r.version, r.release)).unwrap_or_default();
-        for pkg in &order {
-            println!("  {pkg:<width$}  {} -> {}", version(self.state.get(pkg)), version(self.repo.get(pkg)));
+        if !order.is_empty() {
+            println!("Packages available for upgrade (in upgrade order):");
+            let width = order.iter().map(String::len).max().unwrap_or(0);
+            for pkg in &order {
+                println!("  {pkg:<width$}  {} -> {}", version(self.state.get(pkg)), version(self.repo.get(pkg)));
+            }
+        }
+        if !companions.is_empty() {
+            println!("Packages to add for GROUP {}: {}", self.groups.join(" "), companions.join(" "));
         }
         // Dependencies the new versions add (a package whose dependencies
         // cannot be resolved fails on its own later)
@@ -1031,7 +1109,7 @@ impl Paquet {
         if !new_deps.is_empty() {
             println!("New dependencies to install: {}", new_deps.join(" "));
         }
-        let all: Vec<String> = order.iter().chain(&new_deps).cloned().collect();
+        let all: Vec<String> = order.iter().chain(&new_deps).chain(&companions).cloned().collect();
         let all: Vec<String> = all.into_iter().filter(|p| self.repo.get(p).is_some()).collect();
         let (items, cached) = self.plan_downloads(&all)?;
         let (known, unknown) = download::total_size(&items);
@@ -1046,10 +1124,22 @@ impl Paquet {
             return Ok(());
         }
         self.fetch_planned(&items)?;
-        println!("Upgrading all packages with status 'U'...");
+        if !order.is_empty() {
+            println!("Upgrading all packages with status 'U'...");
+        }
         let mut failed = false;
         for pkg in &order {
             if let Err(err) = self.upgrade(pkg) {
+                if err.downcast_ref::<Interrupted>().is_some() {
+                    return Err(err);
+                }
+                util::report(&err);
+                failed = true;
+            }
+        }
+        // Those an upgrade did not already bring
+        for pkg in installed.iter().filter(|p| !order.contains(p)) {
+            if let Err(err) = self.install_companions(pkg) {
                 if err.downcast_ref::<Interrupted>().is_some() {
                     return Err(err);
                 }
@@ -1070,12 +1160,20 @@ impl Paquet {
         }
         self.load_state();
         self.load_repo();
+        // Its translations and configured subpackages go with it
+        let companions: Vec<String> =
+            self.installed_companions(name).into_iter().filter(|c| self.installed_dependents(c).is_empty()).collect();
         if !skip_check {
-            let dependents = self.installed_dependents(name);
+            let dependents: Vec<String> =
+                self.installed_dependents(name).into_iter().filter(|d| !companions.contains(d)).collect();
             if !dependents.is_empty() {
                 bail!("Cannot remove {name}: required by the following installed packages:\n{}", dependents.join("\n"));
             }
         }
+        for companion in &companions {
+            self.remove(companion, true)?;
+        }
+        self.load_state();
 
         // A failing pre-remove script cancels the removal; the post-remove
         // one runs once the files are gone
@@ -1156,6 +1254,10 @@ impl Paquet {
         }
         let mut failed = false;
         for pkg in &orphans {
+            // Already gone with its package (nano.fr with nano)
+            if !self.paths.files_dir.join(pkg).is_file() {
+                continue;
+            }
             if let Err(err) = self.remove(pkg, true) {
                 if err.downcast_ref::<Interrupted>().is_some() {
                     return Err(err);
