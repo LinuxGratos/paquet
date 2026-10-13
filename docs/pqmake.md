@@ -78,6 +78,7 @@ build() {
 | `run_devel` | dépendances du sous-paquet `.devel` |
 | `source` | sources : URL ou fichiers du répertoire de la recette |
 | `PKGMK_GROUPS` | sous-paquets à séparer (voir plus bas) |
+| `PKGMK_IGNORE_GROUPS` | sous-paquets à ne pas produire, parmi ceux par défaut (`PKGMK_IGNORE_GROUPS=(sources)`), ou langues à garder dans le paquet principal (`de`) |
 | `build` | style de construction, pour une recette sans fonction `build()` (voir plus bas) |
 | `PKGMK_IGNORE_RUNTIMEDEPS=yes` | ne pas détecter les dépendances à l'exécution |
 
@@ -210,8 +211,21 @@ sont décrits dans [Scripts et hooks](scripts.md).
 
 ### Les sources
 
-- Une URL (`https://...`) est téléchargée une seule fois, dans
-  `SOURCES_DIR/<recette>/`, puis réutilisée.
+- Une URL (`https://...`) n'est récupérée qu'une fois, dans
+  `SOURCES_DIR/<recette>/`, puis réutilisée. Quand le fichier n'y est pas,
+  `pqmake` le cherche, dans cet ordre :
+  1. dans `USR_SRC_DIR/<nom>-<version>/` (par défaut `/usr/src/`), où
+     `paquet -i <nom>.sources` installe les sources d'une recette ;
+  2. dans l'archive `<nom>-<version>-<release>-sources.tar.zst` du dépôt
+     (`REPO_DIR`), pour la même version et n'importe quelle release ;
+  3. sinon, il le télécharge depuis l'URL du `Pkgfile`.
+
+  ```text
+  Using nano-9.3.tar.xz from /srv/great-os/stable/x86_64/base/nano-9.3-1-sources.tar.zst
+  ```
+
+  Seul le dépôt local est consulté : pour construire sur une autre machine,
+  synchronisez-y le dépôt.
 - Un nom simple est un fichier du répertoire de la recette.
 - Les archives (`.tar`, `.tar.*`, `.tgz`, `.tbz2`, `.txz`, `.zip`) sont
   déballées dans `$SRC` ; les autres fichiers y sont copiés tels quels.
@@ -219,20 +233,80 @@ sont décrits dans [Scripts et hooks](scripts.md).
 ### Les sous-paquets
 
 Une recette peut produire, en plus du paquet principal, des sous-paquets
-`<nom>.<groupe>`, chacun avec sa propre archive. Par défaut, `pqmake` sépare
-les groupes `devel man doc service sources` ; une recette choisit les siens
-avec `PKGMK_GROUPS=(devel man)`, ou n'en sépare aucun avec `PKGMK_GROUPS=()`.
+`<nom>.<groupe>`, chacun avec sa propre archive,
+`<nom>-<version>-<release>-<groupe>.tar.zst`. Par défaut, `pqmake` produit
+les groupes `devel doc service sources` (réglage `PKGMK_GROUPS`). Une
+recette :
+- choisit les siens avec `PKGMK_GROUPS=(devel doc)`, ou n'en produit aucun
+  avec `PKGMK_GROUPS=()` ;
+- en retire seulement certains avec `PKGMK_IGNORE_GROUPS=(sources)` : les
+  autres groupes par défaut restent. Les fichiers d'un groupe retiré restent
+  dans le paquet principal.
+
+Les traductions sont toujours séparées par langue, en plus de ces groupes
+(voir [Les traductions](#les-traductions)).
 
 | Groupe | Fichiers déplacés dans `<nom>.<groupe>` | Dépend de |
 |---|---|---|
 | `devel` | `usr/include`, `usr/lib/pkgconfig`, `usr/share/pkgconfig`, `usr/lib/cmake`, `usr/share/aclocal`, et dans `usr/lib` : `*.a`, `*.la` et les liens `*.so` | `<nom>` et `run_devel` |
 | `doc` | `usr/share/doc`, `usr/share/gtk-doc`, `usr/share/info` | |
-| `man` | `usr/share/man` | |
 | `service` | `etc/rc.d`, `lib/systemd/system`, `usr/lib/systemd/system` | `<nom>` |
-| `sources` | `usr/src` | |
-| `locale` | `usr/share/locale` | |
+| `sources` | rien n'est déplacé : voir ci-dessous | |
 
 Un groupe sans fichier ne produit pas d'archive.
+
+#### Les traductions
+
+`pqmake` sépare automatiquement les traductions, un sous-paquet par langue
+de base : `nano.fr` contient `fr`, `fr_CA`, `fr_BE`..., `nano.pt` contient
+`pt` et `pt_BR`. Sont concernés les sous-répertoires de langue de :
+
+- `usr/share/locale/` (les fichiers `.mo` de gettext) ;
+- `usr/share/man/` (les pages de manuel traduites : `usr/share/man/fr/man1/`) ;
+- `usr/share/help/` (l'aide des applications GNOME).
+
+L'anglais (`en`, `en_GB`, `en@quot`...) reste dans le paquet principal, avec
+tout ce qui n'est pas une langue (`usr/share/help/C`, `locale.alias`) : sans
+autre réglage, un système n'installe que l'anglais. Les pages de manuel
+anglaises (`usr/share/man/man1/`...) restent donc dans le paquet principal,
+les traduites (`usr/share/man/fr/`) vont avec leur langue : il n'y a pas de
+groupe `man`.
+
+Chaque paquet de langue dépend du paquet principal, s'appelle
+`<nom>-<version>-<release>-<langue>.tar.zst` et a son footprint
+(`.footprint.fr`). Une recette garde une langue dans son paquet principal
+avec `PKGMK_IGNORE_GROUPS=(de)`.
+
+C'est à l'installation que l'utilisateur choisit ses langues (`GROUP=fr`
+dans `/etc/pq.conf`, voir [Utilisation](utilisation.md#langues-et-sous-paquets)).
+
+#### Le paquet des sources
+
+Le sous-paquet `<nom>.sources` garde de quoi reconstruire le paquet, dans
+`usr/src/<nom>-<version>/` :
+
+- le `Pkgfile` ;
+- les scripts (`pre-install`, `post-install`, `pre-remove`, `post-remove`) ;
+- les footprints, tels qu'ils sont après la vérification de cette
+  construction ;
+- toutes les sources du `source=()` : les archives téléchargées, telles
+  quelles, et les fichiers de la recette (patchs...).
+
+```text
+==> Packaging nano 9.3-1
+  /srv/great-os/stable/x86_64/base/nano-9.3-1-doc.tar.zst
+  /srv/great-os/stable/x86_64/base/nano-9.3-1-fr.tar.zst
+  /srv/great-os/stable/x86_64/base/nano-9.3-1-sources.tar.zst
+  /srv/great-os/stable/x86_64/base/nano-9.3-1.tar.zst
+```
+
+Il est indexé comme les autres : `paquet -i nano.sources` installe les
+sources dans `/usr/src/nano-9.3/`. `pqmake` s'en sert ensuite quand une
+source n'est plus dans son cache (voir [Les sources](#les-sources)), même si
+elle a disparu en amont. Le paquet des sources n'a pas de footprint.
+
+Pour une recette dont les sources ne doivent pas être redistribuées (licence)
+ou sont trop grosses : `PKGMK_IGNORE_GROUPS=(sources)`.
 
 ### Les dépendances détectées
 
@@ -270,8 +344,9 @@ CFLAGS="-O2 -pipe"
 | `LOG_DIR` | journaux de construction | `~/pqmake/logs` |
 | `MAKEFLAGS` | options de `make` | `-j<nombre de processeurs>` |
 | `CFLAGS`, `CXXFLAGS` | options de compilation | `-O2 -pipe` (`CXXFLAGS` = `CFLAGS`) |
-| `PKGMK_GROUPS` | groupes séparés par défaut | `devel man doc service sources` |
+| `PKGMK_GROUPS` | groupes séparés par défaut | `devel doc service sources` |
 | `STYLES_DIR` | styles de construction partagés | `/etc/pqmake/styles` |
+| `USR_SRC_DIR` | sources installées par les paquets `<nom>.sources` | `/usr/src` |
 | `CHROOT` | système de construction (voir plus bas) | aucun : construction sur l'hôte |
 
 `-R <dir>` et `-o <dir>` remplacent `RECIPES_DIR` et `REPO_DIR` pour une
@@ -309,8 +384,9 @@ $ pqmake salut
 ==> Building libsalut 1.2-1
 ==> build()
 ==> Packaging libsalut 1.2-1
-  /srv/great-os/stable/x86_64/base/libsalut.devel-1.2-1.tar.zst
-  /srv/great-os/stable/x86_64/base/libsalut.doc-1.2-1.tar.zst
+  /srv/great-os/stable/x86_64/base/libsalut-1.2-1-devel.tar.zst
+  /srv/great-os/stable/x86_64/base/libsalut-1.2-1-doc.tar.zst
+  /srv/great-os/stable/x86_64/base/libsalut-1.2-1-sources.tar.zst
   /srv/great-os/stable/x86_64/base/libsalut-1.2-1.tar.zst
 ==> Building salut 0.3-2
 ...

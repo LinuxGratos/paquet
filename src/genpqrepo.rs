@@ -91,10 +91,27 @@ fn find_archives(dir: &Path) -> Vec<PathBuf> {
 pub fn archive_record(repo_dir: &Path, path: &Path) -> Result<Option<Record>> {
     let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let base = file.strip_suffix(".tar.zst").unwrap_or(&file);
-    let Some((name, version, release)) = util::split_archive_base(base) else {
+    if util::split_archive_base(base).is_none() {
+        eprintln!("Warning: skipping {} (expected <name>-<version>-<release>.tar.zst)", path.display());
+        return Ok(None);
+    }
+    let meta = archive::read_meta(path)?.unwrap_or_default();
+    if meta.trim().is_empty() {
+        eprintln!("Warning: no .META found in {}", path.display());
+    }
+    let meta = Meta::parse(&meta);
+    let group = meta.groups.trim();
+    let Some((name, version, release)) = util::split_archive_name(base, group) else {
         eprintln!("Warning: skipping {} (expected <name>-<version>-<release>.tar.zst)", path.display());
         return Ok(None);
     };
+    // paquet finds the archive from the record: its name must follow
+    let expected = util::archive_file_name(&name, version, release, group);
+    if expected != file {
+        eprintln!("Warning: skipping {} (the archive of {name} must be named {expected})", path.display());
+        return Ok(None);
+    }
+    let name = name.as_str();
     if !is_valid_name(name) || !is_valid_version(version) || !is_valid_version(release) {
         eprintln!(
             "Warning: skipping {} (name may only use letters, digits and . _ + -, \
@@ -109,11 +126,6 @@ pub fn archive_record(repo_dir: &Path, path: &Path) -> Result<Option<Record>> {
         .map(|p| p.to_string_lossy().trim_start_matches('/').to_string())
         .unwrap_or_default();
 
-    let meta = archive::read_meta(path)?.unwrap_or_default();
-    if meta.trim().is_empty() {
-        eprintln!("Warning: no .META found in {}", path.display());
-    }
-    let meta = Meta::parse(&meta);
     let checksum = sha256_file(path).with_context(|| format!("unable to read {}", path.display()))?;
     // Archive modification time, so unchanged packages keep their timestamp
     let timestamp = fs::metadata(path)?.mtime();

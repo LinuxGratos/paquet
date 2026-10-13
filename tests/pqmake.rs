@@ -128,9 +128,8 @@ fn builds_in_dependency_order() {
     let repo = env.repo_dir();
     for archive in [
         "base/libfake-1.0_rc1-2.tar.zst",
-        "base/libfake.devel-1.0_rc1-2.tar.zst",
+        "base/libfake-1.0_rc1-2-devel.tar.zst",
         "extra/hello-2.1-1.tar.zst",
-        "extra/hello.man-2.1-1.tar.zst",
         "extra/extradep-1-1.tar.zst",
     ] {
         assert!(repo.join(archive).is_file(), "{archive} missing:\n{}", r.all());
@@ -145,23 +144,19 @@ fn builds_in_dependency_order() {
     if some_elf_program().is_some() {
         assert!(hello.contains("Depends: extradep libfake\n"), "{hello}");
     }
-    let devel = meta("base/libfake.devel-1.0_rc1-2.tar.zst");
+    let devel = meta("base/libfake-1.0_rc1-2-devel.tar.zst");
     assert!(
         devel.contains("Description: Fake C library (devel)\nGroups: devel\nSet: base\nDepends: libfake\n"),
         "{devel}"
     );
-    let names: Vec<String> = paquet::archive::list(&repo.join("extra/hello.man-2.1-1.tar.zst"))
-        .unwrap()
-        .iter()
-        .map(|e| String::from_utf8_lossy(&e.name).into_owned())
-        .collect();
-    assert!(names.contains(&"usr/share/man/man1/hello.1".to_string()), "{names:?}");
+    // English manual pages stay in the main package
+    assert!(!repo.join("extra/hello-2.1-1-man.tar.zst").exists());
     let names: Vec<String> = paquet::archive::list(&repo.join("extra/hello-2.1-1.tar.zst"))
         .unwrap()
         .iter()
         .map(|e| String::from_utf8_lossy(&e.name).into_owned())
         .collect();
-    assert!(!names.iter().any(|n| n.contains("/man/")), "{names:?}");
+    assert!(names.contains(&"usr/share/man/man1/hello.1".to_string()), "{names:?}");
     assert!(names.contains(&"usr/share/hello/inside.txt".to_string()), "{names:?}");
 
     // Up to date, unless forced
@@ -293,16 +288,16 @@ fn footprints_show_what_changed() {
     };
     tool(
         "1",
-        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool" "$PKG/usr/share/man/man1"
+        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool" "$PKG/usr/share/locale/fr"
     printf '#!/bin/sh\n' > "$PKG/usr/bin/tool"; chmod 755 "$PKG/usr/bin/tool"
     echo a > "$PKG/usr/share/tool/a"
     ln -s a "$PKG/usr/share/tool/link"
-    echo man > "$PKG/usr/share/man/man1/tool.1""#,
+    echo fr > "$PKG/usr/share/locale/fr/tool.mo""#,
     );
     let r = pqmake(&env, &["-q", "tool"]);
     assert!(r.ok(), "{}", r.all());
     assert!(r.stdout.contains("  new footprint: base/tool/.footprint\n"), "{}", r.stdout);
-    assert!(r.stdout.contains("  new footprint: base/tool/.footprint.man\n"), "{}", r.stdout);
+    assert!(r.stdout.contains("  new footprint: base/tool/.footprint.fr\n"), "{}", r.stdout);
     let footprint = fs::read_to_string(env.path("recipes/base/tool/.footprint")).unwrap();
     assert_eq!(
         footprint,
@@ -335,7 +330,7 @@ fn footprints_show_what_changed() {
                     \x20   MISSING  -rw-r--r-- root/root usr/share/tool/a\n\
                     \x20   NEW      -rw-r--r-- root/root usr/share/tool/b\n\
                     \x20   CHANGED  lrwxrwxrwx root/root usr/share/tool/link -> b  (was -> a)\n\
-                    ==> tool.man is no longer produced (base/tool/.footprint.man)\n\
+                    ==> tool.fr is no longer produced (base/tool/.footprint.fr)\n\
                     \x20   If these changes are expected: pqmake --update-footprint tool\n";
     assert!(r.stdout.contains(expected), "{}", r.stdout);
     assert!(r.stdout.contains("==> Footprint changed: tool (see above)"), "{}", r.stdout);
@@ -344,13 +339,13 @@ fn footprints_show_what_changed() {
     // The packager accepts the changes
     let r = pqmake(&env, &["--update-footprint", "tool"]);
     assert!(r.ok(), "{}", r.all());
-    assert_eq!(r.stdout, "  base/tool/.footprint updated\n  base/tool/.footprint.man removed\n");
+    assert_eq!(r.stdout, "  base/tool/.footprint updated\n  base/tool/.footprint.fr removed\n");
     assert!(
         fs::read_to_string(env.path("recipes/base/tool/.footprint"))
             .unwrap()
             .contains("-rwsr-xr-x\troot/root\tusr/bin/tool\n")
     );
-    assert!(!env.path("recipes/base/tool/.footprint.man").exists());
+    assert!(!env.path("recipes/base/tool/.footprint.fr").exists());
     assert_eq!(pqmake(&env, &["-u", "tool"]).stdout, "  footprints of tool are up to date\n");
     let r = pqmake(&env, &["-q", "-f", "tool"]);
     assert!(r.ok() && !r.stdout.contains("ootprint"), "{}", r.all());
@@ -435,4 +430,212 @@ fn provided_build_styles() {
         fs::read_to_string(root.join("usr/share/fake/args")).unwrap(),
         "configured with --prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-static\n"
     );
+}
+
+#[test]
+fn sources_packages() {
+    let env = Env::new();
+    // Upstream: an HTTP server holding the source archive
+    fs::create_dir_all(env.path("upstream/srcdemo-1.0")).unwrap();
+    fs::write(env.path("upstream/srcdemo-1.0/hello.txt"), "from upstream\n").unwrap();
+    let ok = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(env.path("upstream/srcdemo-1.0.tar.gz"))
+        .arg("-C")
+        .arg(env.path("upstream"))
+        .arg("srcdemo-1.0")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let (url, served) = common::serve(env.path("upstream"));
+    let gets = || served.requests.lock().unwrap().iter().filter(|r| r.starts_with("GET ")).count();
+    let build = |release: &str, extra: &str| -> Run {
+        recipe(
+            &env,
+            "base",
+            "srcdemo",
+            &format!(
+                "name=srcdemo\nversion=1.0\nrelease={release}\ndescription=\"Demo\"\n{extra}\n\
+                 source=({url}/srcdemo-1.0.tar.gz local.patch)\n\
+                 build() {{\n    test -f local.patch\n    mkdir -p \"$PKG/usr/share/srcdemo\"\n    \
+                 cp srcdemo-1.0/hello.txt \"$PKG/usr/share/srcdemo/\"\n}}\n"
+            ),
+        );
+        let config = env.path("pqmake.conf").display().to_string();
+        let home = env.tmp.path().display().to_string();
+        env.cmd_env(
+            "pqmake",
+            &["srcdemo"],
+            None,
+            &[
+                ("PQMAKE_CONFIG", &config),
+                ("PQMAKE_ALLOW_ROOT", "1"),
+                ("HOME", &home),
+                ("NO_PROXY", "127.0.0.1"),
+                ("no_proxy", "127.0.0.1"),
+            ],
+        )
+    };
+    pqmake(&env, &["-n", "nothing"]); // writes the configuration
+    fs::create_dir_all(env.path("recipes/base/srcdemo")).unwrap();
+    fs::write(env.path("recipes/base/srcdemo/local.patch"), "patch\n").unwrap();
+    fs::write(env.path("recipes/base/srcdemo/post-install"), "echo installed\n").unwrap();
+
+    // First build: downloaded, then kept in the sources package with the
+    // recipe
+    let r = build("1", "");
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!(gets(), 1);
+    let repo = env.repo_dir();
+    let sources = repo.join("base/srcdemo-1.0-1-sources.tar.zst");
+    assert!(repo.join("base/srcdemo-1.0-1.tar.zst").is_file());
+    let mut names: Vec<String> = paquet::archive::list(&sources)
+        .unwrap()
+        .iter()
+        .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            ".META",
+            "usr",
+            "usr/src",
+            "usr/src/srcdemo-1.0",
+            "usr/src/srcdemo-1.0/.footprint",
+            "usr/src/srcdemo-1.0/Pkgfile",
+            "usr/src/srcdemo-1.0/local.patch",
+            "usr/src/srcdemo-1.0/post-install",
+            "usr/src/srcdemo-1.0/srcdemo-1.0.tar.gz",
+        ]
+    );
+    let meta = paquet::archive::read_meta(&sources).unwrap().unwrap();
+    assert!(meta.starts_with("Description: Demo (sources)\nGroups: sources\n"), "{meta}");
+    assert!(!env.path("recipes/base/srcdemo/.footprint.sources").exists(), "no footprint for the sources");
+
+    // Not in the cache any more: taken from the sources package in the
+    // repository, not downloaded
+    fs::remove_dir_all(env.path("sources/srcdemo")).unwrap();
+    let r = build("2", "");
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains(&format!("Using srcdemo-1.0.tar.gz from {}", sources.display())), "{}", r.stdout);
+    assert_eq!(gets(), 1);
+    assert!(env.path("sources/srcdemo/srcdemo-1.0.tar.gz").is_file());
+
+    // Installed sources (USR_SRC_DIR) come before the repository
+    let usr_src = env.path("usrsrc/srcdemo-1.0");
+    fs::create_dir_all(&usr_src).unwrap();
+    fs::copy(env.path("upstream/srcdemo-1.0.tar.gz"), usr_src.join("srcdemo-1.0.tar.gz")).unwrap();
+    let mut config = fs::read_to_string(env.path("pqmake.conf")).unwrap();
+    config.push_str(&format!("USR_SRC_DIR={}\n", env.path("usrsrc").display()));
+    fs::write(env.path("pqmake.conf"), config).unwrap();
+    fs::remove_dir_all(env.path("sources/srcdemo")).unwrap();
+    let r = build("3", "");
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains(&format!("Using srcdemo-1.0.tar.gz from {}", usr_src.display())), "{}", r.stdout);
+    assert_eq!(gets(), 1);
+
+    // The sources package installs in /usr/src/<name>-<version>/
+    paquet::genpqrepo::generate(&repo, &repo.join("PQREPO"), None, None).unwrap();
+    assert!(env.pq(&["-S", "--nosign"]).ok());
+    let r = env.pq(&["-i", "srcdemo.sources"]);
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!(fs::read_to_string(env.rootpath("usr/src/srcdemo-1.0/local.patch")).unwrap(), "patch\n");
+
+    // PKGMK_IGNORE_GROUPS=(sources): no sources package
+    let r = build("4", "PKGMK_IGNORE_GROUPS=(sources nope)");
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stderr.contains("PKGMK_IGNORE_GROUPS: unknown group 'nope'"), "{}", r.stderr);
+    assert!(repo.join("base/srcdemo-1.0-4.tar.zst").is_file());
+    assert!(!repo.join("base/srcdemo-1.0-4-sources.tar.zst").exists());
+}
+
+#[test]
+fn translations_are_split_by_language() {
+    let env = Env::new();
+    let polyglot = |release: &str, extra: &str| {
+        recipe(
+            &env,
+            "base",
+            "polyglot",
+            &format!(
+                r#"name=polyglot
+version=1
+release={release}
+description="Speaks"
+{extra}
+build() {{
+    mkdir -p "$PKG/usr/bin" "$PKG/usr/share/man/man1" "$PKG/usr/share/man/fr/man1"
+    echo program > "$PKG/usr/bin/polyglot"
+    for d in fr fr_CA de en_GB en@quot pt_BR; do
+        mkdir -p "$PKG/usr/share/locale/$d/LC_MESSAGES"
+        echo $d > "$PKG/usr/share/locale/$d/LC_MESSAGES/polyglot.mo"
+    done
+    echo alias > "$PKG/usr/share/locale/locale.alias"
+    echo man > "$PKG/usr/share/man/man1/polyglot.1"
+    echo page > "$PKG/usr/share/man/fr/man1/polyglot.1"
+    mkdir -p "$PKG/usr/share/help/C" "$PKG/usr/share/help/de"
+    echo help > "$PKG/usr/share/help/C/index.page"
+    echo hilfe > "$PKG/usr/share/help/de/index.page"
+}}
+"#
+            ),
+        );
+    };
+    polyglot("1", "");
+    let r = pqmake(&env, &["-q", "polyglot"]);
+    assert!(r.ok(), "{}", r.all());
+    let repo = env.repo_dir().join("base");
+    let files = |archive: &str| -> Vec<String> {
+        paquet::archive::list(&repo.join(archive))
+            .unwrap()
+            .iter()
+            .filter(|e| !e.is_dir && !e.name.starts_with(b"."))
+            .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+            .collect()
+    };
+    // English stays in the main package
+    assert_eq!(
+        files("polyglot-1-1.tar.zst"),
+        [
+            "usr/bin/polyglot",
+            "usr/share/help/C/index.page",
+            "usr/share/locale/en@quot/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/en_GB/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/locale.alias",
+            "usr/share/man/man1/polyglot.1",
+        ]
+    );
+    // One package per base language, translated manual pages included
+    assert_eq!(
+        files("polyglot-1-1-fr.tar.zst"),
+        [
+            "usr/share/locale/fr/LC_MESSAGES/polyglot.mo",
+            "usr/share/locale/fr_CA/LC_MESSAGES/polyglot.mo",
+            "usr/share/man/fr/man1/polyglot.1",
+        ]
+    );
+    assert_eq!(
+        files("polyglot-1-1-de.tar.zst"),
+        ["usr/share/help/de/index.page", "usr/share/locale/de/LC_MESSAGES/polyglot.mo"]
+    );
+    assert_eq!(files("polyglot-1-1-pt.tar.zst"), ["usr/share/locale/pt_BR/LC_MESSAGES/polyglot.mo"]);
+    assert!(!repo.join("polyglot-1-1-man.tar.zst").exists());
+    let meta = paquet::archive::read_meta(&repo.join("polyglot-1-1-fr.tar.zst")).unwrap().unwrap();
+    assert_eq!(meta, "Description: Speaks (fr)\nGroups: fr\nSet: base\nDepends: polyglot\n");
+    assert!(env.path("recipes/base/polyglot/.footprint.fr").is_file());
+
+    // A language kept in the main package
+    polyglot("2", "PKGMK_IGNORE_GROUPS=(de)");
+    let r = pqmake(&env, &["-q", "polyglot"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(!repo.join("polyglot-1-2-de.tar.zst").exists());
+    assert!(files("polyglot-1-2.tar.zst").contains(&"usr/share/locale/de/LC_MESSAGES/polyglot.mo".to_string()));
+    assert!(r.stdout.contains("==> polyglot.de is no longer produced (base/polyglot/.footprint.de)"), "{}", r.stdout);
+
+    // The repository index knows the language packages
+    env.index(None);
+    let index = fs::read_to_string(env.repo_dir().join("PQREPO")).unwrap();
+    assert!(index.contains(";polyglot.fr;1;2;"), "{index}");
 }

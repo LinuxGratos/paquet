@@ -26,7 +26,8 @@ use crate::util::{self, is_valid_name, is_valid_version};
 use crate::{config, signals};
 
 /// Subpackages a recipe can split off with `PKGMK_GROUPS`: `<name>.<group>`.
-pub const KNOWN_GROUPS: [&str; 6] = ["devel", "doc", "man", "service", "sources", "locale"];
+/// Translations always go to one subpackage per language, `<name>.<language>`.
+pub const KNOWN_GROUPS: [&str; 4] = util::PACKAGE_GROUPS;
 
 pub fn is_known_group(group: &str) -> bool {
     KNOWN_GROUPS.contains(&group)
@@ -61,7 +62,8 @@ const RECIPE_FIELDS: &str = r#"
 printf "%s\n" "${name:-}" "${version:-}" "${release:-1}" \
     "${description//$'\n'/ }" "${makedepends[*]}" "${run[*]}" \
     "${run_devel[*]}" "${PKGMK_GROUPS[*]}" "${source[*]}" \
-    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}" "${build:-}" "$PQMAKE_BUILD_FUNCTION"
+    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}" "${build:-}" "$PQMAKE_BUILD_FUNCTION" \
+    "${PKGMK_IGNORE_GROUPS[*]}"
 "#;
 
 /// Build of a recipe: prepare(), build() and package(), when defined, each
@@ -94,6 +96,9 @@ pub struct Settings {
     pub default_groups: String,
     /// Shared build styles (`build=<style>`), after `<recipes>/styles`.
     pub styles_dir: PathBuf,
+    /// Sources installed by `<name>.sources` packages, looked up before
+    /// downloading.
+    pub usr_src_dir: PathBuf,
     pub dry_run: bool,
     pub keep_going: bool,
     pub quiet: bool,
@@ -121,8 +126,9 @@ impl Settings {
             cflags: "-O2 -pipe".into(),
             cxxflags: String::new(),
             chroot: None,
-            default_groups: "devel man doc service sources".into(),
+            default_groups: "devel doc service sources".into(),
             styles_dir: "/etc/pqmake/styles".into(),
+            usr_src_dir: "/usr/src".into(),
             dry_run: false,
             keep_going: false,
             quiet: false,
@@ -154,6 +160,7 @@ impl Settings {
                 "CXXFLAGS" => self.cxxflags = value,
                 "PKGMK_GROUPS" => self.default_groups = value,
                 "STYLES_DIR" => self.styles_dir = value.into(),
+                "USR_SRC_DIR" => self.usr_src_dir = value.into(),
                 "CHROOT" => self.chroot = Some(value.into()).filter(|p: &PathBuf| !p.as_os_str().is_empty()),
                 _ => eprintln!("Warning: ignoring unknown setting {key} in {}", path.display()),
             }
@@ -172,6 +179,8 @@ pub struct Recipe {
     pub run: Vec<String>,
     pub run_devel: Vec<String>,
     pub groups: Vec<String>,
+    /// Languages kept in the main package (`PKGMK_IGNORE_GROUPS=(de)`)
+    pub ignored_languages: Vec<String>,
     pub sources: Vec<String>,
     pub no_rtdeps: bool,
     /// Build style file, for a recipe without build() function
@@ -307,7 +316,7 @@ impl Pqmake {
             .context("unable to run bash")?;
         let text = String::from_utf8_lossy(&output.stdout);
         let fields: Vec<&str> = text.lines().collect();
-        if fields.len() != 12 {
+        if fields.len() != 13 {
             bail!("cannot read {}.", pkgfile.display());
         }
         // "-" separates the fields of an archive name: 1.3-20240619 becomes
@@ -334,6 +343,22 @@ impl Pqmake {
                 );
             }
         }
+        // PKGMK_IGNORE_GROUPS=(sources) removes groups from the default (or
+        // the recipe's) PKGMK_GROUPS; a language stays in the main package
+        let mut ignored_languages = Vec::new();
+        for group in fields[12].split_whitespace() {
+            if is_known_group(group) {
+                groups.retain(|g| g != group);
+            } else if util::is_language(group) {
+                ignored_languages.push(group.to_string());
+            } else {
+                eprintln!(
+                    "Warning: {}: PKGMK_IGNORE_GROUPS: unknown group '{group}' (known: {}, or a language).",
+                    pkgfile.display(),
+                    KNOWN_GROUPS.join(" ")
+                );
+            }
+        }
         let style = if fields[11] == "function" { None } else { self.find_style(fields[10], &pkgfile)? };
         let words = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         self.recipes.insert(
@@ -346,6 +371,7 @@ impl Pqmake {
                 run: words(fields[5]),
                 run_devel: words(fields[6]),
                 groups,
+                ignored_languages,
                 sources: words(fields[8]),
                 no_rtdeps: fields[9] == "yes",
                 style,
@@ -390,8 +416,8 @@ impl Pqmake {
         if self.recipe_path.contains_key(dep) {
             return Some(dep.to_string());
         }
-        let (base, group) = dep.rsplit_once('.')?;
-        (self.recipe_path.contains_key(base) && is_known_group(group)).then(|| base.to_string())
+        let (base, _) = util::split_group(dep)?;
+        self.recipe_path.contains_key(base).then(|| base.to_string())
     }
 
     /// Every recipe the targets need, at build time or at run time.
@@ -510,7 +536,27 @@ impl Pqmake {
     /// Archive of a recipe (or of one of its groups) in the repository.
     pub fn archive_path(&self, name: &str, pkgname: &str) -> PathBuf {
         let r = self.recipe(name);
-        self.s.repo_dir.join(&self.recipe_set[name]).join(format!("{pkgname}-{}-{}.tar.zst", r.version, r.release))
+        let group = pkgname.strip_prefix(name).and_then(|g| g.strip_prefix('.')).unwrap_or("");
+        self.s
+            .repo_dir
+            .join(&self.recipe_set[name])
+            .join(util::archive_file_name(pkgname, &r.version, &r.release, group))
+    }
+
+    /// Subpackages of a recipe's current version in the repository, as
+    /// (group or language, archive).
+    pub fn existing_subpackages(&self, name: &str) -> Vec<(String, PathBuf)> {
+        let r = self.recipe(name);
+        let dir = self.s.repo_dir.join(&self.recipe_set[name]);
+        let prefix = format!("{name}-{}-{}-", r.version, r.release);
+        util::files_with_suffix(&dir, ".tar.zst")
+            .into_iter()
+            .filter_map(|path| {
+                let file = path.file_name()?.to_str()?;
+                let group = file.strip_prefix(&prefix)?.strip_suffix(".tar.zst")?;
+                util::is_package_group(group).then(|| (group.to_string(), path.clone()))
+            })
+            .collect()
     }
 
     /// The main archive is written last: its presence means the build is
@@ -621,7 +667,7 @@ impl Pqmake {
     }
 }
 
-fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn read_dir_sorted(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()).collect();
     entries.sort_by(|a, b| util::path_bytes(a).cmp(util::path_bytes(b)));
     entries
@@ -654,7 +700,7 @@ pub fn display_help(prog: &str, config_file: &Path) {
     println!();
     println!("Settings are read from {} (KEY=value lines):", config_file.display());
     println!("  RECIPES_DIR, REPO_DIR, WORK_DIR, SOURCES_DIR, LOG_DIR, MAKEFLAGS, CFLAGS,");
-    println!("  CXXFLAGS, PKGMK_GROUPS, STYLES_DIR, CHROOT");
+    println!("  CXXFLAGS, PKGMK_GROUPS, STYLES_DIR, USR_SRC_DIR, CHROOT");
 }
 
 /// Entry point of the `pqmake` command.

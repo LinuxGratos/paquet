@@ -43,10 +43,10 @@ pub fn group_paths(group: &str, root: &Path) -> Vec<String> {
             paths
         }
         "doc" => existing(&["usr/share/doc", "usr/share/gtk-doc", "usr/share/info"]),
-        "man" => existing(&["usr/share/man"]),
         "service" => existing(&["etc/rc.d", "lib/systemd/system", "usr/lib/systemd/system"]),
-        "sources" => existing(&["usr/src"]),
-        "locale" => existing(&["usr/share/locale"]),
+        // Not split off the package: built from the recipe (see
+        // Pqmake::write_sources)
+        "sources" => Vec::new(),
         _ => Vec::new(),
     }
 }
@@ -69,6 +69,49 @@ pub fn split_group(group: &str, root: &Path, dest: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Directories holding one subdirectory per locale (`usr/share/locale/fr`,
+/// `usr/share/man/fr`...), split into one subpackage per language.
+pub const LOCALE_DIRS: [&str; 3] = ["usr/share/locale", "usr/share/man", "usr/share/help"];
+
+/// Moves the translations of `root` to `<dest>/<language>/`, one tree per
+/// base language (`fr_CA` goes with `fr`). English stays, as do the
+/// `ignored` languages. Returns the languages found, sorted.
+pub fn split_languages(root: &Path, dest: &Path, ignored: &[String]) -> io::Result<Vec<String>> {
+    let mut languages: Vec<String> = Vec::new();
+    for dir in LOCALE_DIRS {
+        let mut entries: Vec<String> = fs::read_dir(root.join(dir))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        for entry in entries {
+            let Some(lang) = util::locale_language(&entry) else { continue };
+            if lang == "en" || ignored.iter().any(|i| i == lang) {
+                continue;
+            }
+            let target = dest.join(lang).join(dir).join(&entry);
+            fs::create_dir_all(target.parent().unwrap_or(dest))?;
+            move_tree(&root.join(dir).join(&entry), &target)?;
+            if !languages.iter().any(|l| l == lang) {
+                languages.push(lang.to_string());
+            }
+        }
+        // Directories left empty by the move
+        let mut parent = Some(Path::new(dir));
+        while let Some(p) = parent.filter(|p| !p.as_os_str().is_empty()) {
+            if fs::remove_dir(root.join(p)).is_err() {
+                break;
+            }
+            parent = p.parent();
+        }
+    }
+    languages.sort();
+    Ok(languages)
 }
 
 /// Words of a list without repetitions, in order.
@@ -206,11 +249,8 @@ impl Pqmake {
                     continue;
                 }
             }
-            let package = base
-                .strip_suffix(".tar.zst")
-                .and_then(util::split_archive_base)
-                .map(|(n, _, _)| n.to_string())
-                .unwrap_or_default();
+            let package =
+                base.strip_suffix(".tar.zst").and_then(util::split_archive_base).map(|(n, _, _)| n).unwrap_or_default();
             let content = fs::read_to_string(&list).unwrap_or_default();
             for line in content.lines() {
                 let line = line.strip_prefix("./").unwrap_or(line);
@@ -245,7 +285,16 @@ impl Pqmake {
         let mut packages: Vec<String> = Vec::new();
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut depends: Vec<Vec<String>> = Vec::new();
-        for group in &r.groups {
+        // Translations: one package per language
+        let languages = work.join("languages");
+        let found =
+            split_languages(pkg, &languages, &r.ignored_languages).context("unable to split the translations")?;
+        for lang in found {
+            packages.push(format!("{name}.{lang}"));
+            dirs.push(languages.join(&lang));
+            depends.push(vec![name.to_string()]);
+        }
+        for group in r.groups.iter().filter(|g| *g != "sources") {
             let dest = work.join(group);
             fs::create_dir_all(&dest)?;
             split_group(group, pkg, &dest).with_context(|| format!("unable to split the {group} files"))?;
@@ -293,25 +342,89 @@ impl Pqmake {
             }
         }
 
-        for (i, dir) in dirs.iter().enumerate() {
-            let group = if packages[i] == name { "" } else { packages[i].rsplit('.').next().unwrap_or("") };
-            let description =
-                if group.is_empty() { r.description.clone() } else { format!("{} ({group})", r.description) };
+        // The subpackages first
+        let main = packages.len() - 1;
+        let mut produced: Vec<(String, PathBuf)> = Vec::new();
+        for i in 0..main {
+            let group = packages[i].rsplit('.').next().unwrap_or("").to_string();
+            let description = format!("{} ({group})", r.description);
             let deps = unique_words(depends[i].iter().map(String::as_str));
-            self.write_archive(name, &packages[i], dir, group, &description, &deps)?;
+            self.write_archive(name, &packages[i], &dirs[i], &group, &description, &deps)?;
+            produced.push((group, self.archive_path(name, &packages[i])));
         }
+        // The main archive is written last: its presence means the build is
+        // complete. Its footprint is checked on the staged archive, before
+        // the sources package takes the footprints of the recipe.
+        let deps = unique_words(depends[main].iter().map(String::as_str));
+        let main_part = self.stage_archive(name, name, &dirs[main], "", &r.description, &deps)?;
+        let rest = (|| -> Result<()> {
+            produced.insert(0, (String::new(), main_part.clone()));
+            self.check_footprints(name, &produced);
+            if r.groups.iter().any(|g| g == "sources") {
+                self.write_sources(name, work)?;
+                packages.push(format!("{name}.sources"));
+            }
+            Ok(())
+        })();
+        if let Err(err) = rest {
+            let _ = fs::remove_file(&main_part);
+            return Err(err);
+        }
+        let archive_path = self.archive_path(name, name);
+        fs::rename(&main_part, &archive_path)?;
+        println!("  {}", archive_path.display());
+
         // A subpackage this build no longer produces must not stay next to
         // the new main package (rebuild of the same version)
-        for group in super::KNOWN_GROUPS {
-            let pkgname = format!("{name}.{group}");
-            let stale = self.archive_path(name, &pkgname);
-            if !packages.contains(&pkgname) && stale.is_file() {
+        for (group, stale) in self.existing_subpackages(name) {
+            if !packages.contains(&format!("{name}.{group}")) {
                 fs::remove_file(&stale).with_context(|| format!("unable to remove {}", stale.display()))?;
                 println!("  {} removed (no longer produced)", stale.display());
             }
         }
         self.index_dirty = true;
         Ok(())
+    }
+
+    /// Writes the `sources` subpackage: the Pkgfile, the scripts and the
+    /// footprints of the recipe, with its sources (downloaded or not), in
+    /// `usr/src/<name>-<version>/`.
+    fn write_sources(&self, name: &str, work: &Path) -> Result<()> {
+        let r = self.recipe(name);
+        let pkgfile = &self.recipe_path[name];
+        let recipe_dir = pkgfile.parent().unwrap_or(Path::new("."));
+        let root = work.join("sources");
+        super::build::remove_work(&root)?;
+        let dest = root.join("usr/src").join(format!("{name}-{}", r.version));
+        fs::create_dir_all(&dest)?;
+
+        let mut files: Vec<(PathBuf, String)> = vec![(pkgfile.clone(), "Pkgfile".to_string())];
+        for (script, _) in archive::SCRIPTS {
+            files.push((recipe_dir.join(script), script.to_string()));
+        }
+        for path in super::read_dir_sorted(recipe_dir) {
+            let file = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if file == ".footprint" || file.starts_with(".footprint.") {
+                files.push((path, file));
+            }
+        }
+        for entry in &r.sources {
+            let file = entry.rsplit('/').next().unwrap_or("").to_string();
+            let path =
+                if entry.contains("://") { self.s.sources_dir.join(name).join(&file) } else { recipe_dir.join(entry) };
+            files.push((path, file));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (src, file) in files {
+            if !src.is_file() || !seen.insert(file.clone()) {
+                continue;
+            }
+            let target = dest.join(&file);
+            fs::copy(&src, &target).with_context(|| format!("unable to add {} to the sources", src.display()))?;
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
+        }
+        let description = format!("{} (sources)", r.description);
+        self.write_archive(name, &format!("{name}.sources"), &root, "sources", &description, "")
     }
 
     fn write_archive(
@@ -323,6 +436,24 @@ impl Pqmake {
         description: &str,
         depends: &str,
     ) -> Result<()> {
+        let part = self.stage_archive(name, pkgname, root, groups, description, depends)?;
+        let archive_path = self.archive_path(name, pkgname);
+        fs::rename(&part, &archive_path)?;
+        println!("  {}", archive_path.display());
+        Ok(())
+    }
+
+    /// Writes the archive of a package to `<archive>.part`, and returns
+    /// that path.
+    fn stage_archive(
+        &self,
+        name: &str,
+        pkgname: &str,
+        root: &Path,
+        groups: &str,
+        description: &str,
+        depends: &str,
+    ) -> Result<PathBuf> {
         let archive_path = self.archive_path(name, pkgname);
         let mut meta = format!("Description: {description}\nGroups: {groups}\nSet: {}\n", self.recipe_set[name]);
         if !depends.is_empty() {
@@ -353,9 +484,7 @@ impl Pqmake {
             let _ = fs::remove_file(&part);
             return Err(err);
         }
-        fs::rename(&part, &archive_path)?;
-        println!("  {}", archive_path.display());
-        Ok(())
+        Ok(part)
     }
 }
 

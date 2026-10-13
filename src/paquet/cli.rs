@@ -118,10 +118,26 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     }
     let (mut mirror, mut branch) = (String::new(), String::new());
     let mut jobs = super::download::DEFAULT_JOBS;
+    let mut groups: Vec<String> = Vec::new();
     for (key, value) in config::read(&paths.config_file)? {
         match key.as_str() {
             "MIRROR" => mirror = value,
             "BRANCH" => branch = value,
+            // GROUP="fr" (several lines, or several words): subpackages
+            // installed with every package
+            "GROUP" => {
+                for group in value.split_whitespace() {
+                    if !util::is_package_group(group) {
+                        eprintln!(
+                            "Warning: GROUP: '{group}' is neither a language (fr, de...) nor a group ({}) in {}",
+                            util::PACKAGE_GROUPS.join(" "),
+                            paths.config_file.display()
+                        );
+                    } else if !groups.iter().any(|g| g == group) {
+                        groups.push(group.to_string());
+                    }
+                }
+            }
             "PARALLEL_DOWNLOADS" => match value.parse::<usize>() {
                 Ok(n) if (1..=super::download::MAX_JOBS).contains(&n) => jobs = n,
                 _ => eprintln!(
@@ -141,6 +157,7 @@ fn run(prog: &str, raw_args: Vec<String>) -> Result<()> {
     pq.noscripts = noscripts;
     pq.assume_yes = yes;
     pq.jobs = jobs;
+    pq.groups = groups;
 
     // Package names end up in paths: reject anything unsafe early
     if matches!(

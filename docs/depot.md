@@ -14,7 +14,8 @@ ou lu en local (`file://`). `genpqrepo` en génère l'index, `PQREPO`, que
 │   │   ├── PQREPO.sig                 <- signature de l'index
 │   │   ├── base/                      <- dossier (l'ensemble de la recette)
 │   │   │   ├── libsalut-1.2-1.tar.zst
-│   │   │   ├── libsalut.devel-1.2-1.tar.zst
+│   │   │   ├── libsalut-1.2-1-devel.tar.zst
+│   │   │   ├── libsalut-1.2-1-sources.tar.zst
 │   │   │   └── nano-8.2-1.tar.zst
 │   │   └── extra/
 │   │       └── salut-0.3-2.tar.zst
@@ -36,7 +37,16 @@ exemple `/srv/great-os/stable/x86_64`.
 
 ## Les archives
 
-Une archive s'appelle `<nom>-<version>-<release>.tar.zst` : une archive tar
+Une archive s'appelle `<nom>-<version>-<release>.tar.zst`, ou
+`<nom>-<version>-<release>-<groupe>.tar.zst` pour un sous-paquet
+(`libsalut-1.2-1-devel.tar.zst` est l'archive du paquet `libsalut.devel`).
+Les groupes sont `devel`, `doc`, `service` et `sources`, ou une langue
+(`libsalut-1.2-1-fr.tar.zst` pour `libsalut.fr`). Le nom de l'archive suit le
+`Groups:` de son `.META` : un paquet principal (`Groups:` vide) nommé
+`foo.js` garde l'archive `foo.js-1.0-1.tar.zst`. `genpqrepo` ignore, avec un
+avertissement, une archive dont le nom ne suit pas cette règle (par exemple
+l'ancienne forme `libsalut.devel-1.2-1.tar.zst`), car `paquet` ne la
+trouverait pas. C'est une archive tar
 compressée avec zstd, qui contient les fichiers du paquet relativement à `/`,
 un fichier `.META` à la racine et, facultativement, les scripts du paquet
 (`.PRE-INSTALL`, `.POST-INSTALL`, `.PRE-REMOVE`, `.POST-REMOVE`, voir

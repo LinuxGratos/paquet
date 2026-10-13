@@ -177,6 +177,34 @@ pub fn read_metadata(path: &Path, names: &[&str]) -> Result<HashMap<String, Vec<
     Ok(found)
 }
 
+/// Copies one regular file of an archive (`usr/src/nano-8.2/nano-8.2.tar.xz`)
+/// to `dest`, through `<dest>.part`. Returns false when the archive does not
+/// hold it.
+pub fn extract_file(path: &Path, entry_name: &[u8], dest: &Path) -> Result<bool> {
+    let mut archive = open(path)?;
+    let part = crate::util::with_suffix(dest, ".part");
+    let found = (|| -> io::Result<bool> {
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let kind = entry.header().entry_type();
+            if (kind.is_file() || kind == tar::EntryType::Continuous)
+                && normalize_entry(&entry.path_bytes()) == entry_name
+            {
+                let mut file = fs::File::create(&part)?;
+                io::copy(&mut entry, &mut file)?;
+                file.sync_all()?;
+                fs::rename(&part, dest)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })();
+    if found.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    found.with_context(|| format!("unable to read archive {}", path.display()))
+}
+
 /// A link whose creation waits for the end of the extraction.
 struct Delayed {
     dest: PathBuf,
