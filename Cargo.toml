@@ -1,0 +1,48 @@
+[package]
+name = "paquet"
+version = "0.1.0"
+edition = "2024"
+description = "Gestionnaire de paquets de Great-OS : paquet (pq), genpqrepo et pqmake"
+license = "MIT"
+repository = "https://github.com/linuxgratos/paquet"
+rust-version = "1.87"
+
+[lib]
+name = "paquet"
+path = "src/lib.rs"
+
+[[bin]]
+name = "paquet"
+path = "src/bin/paquet.rs"
+
+[[bin]]
+name = "pq"
+path = "src/bin/pq.rs"
+
+[[bin]]
+name = "genpqrepo"
+path = "src/bin/genpqrepo.rs"
+
+[[bin]]
+name = "pqmake"
+path = "src/bin/pqmake.rs"
+
+[dependencies]
+anyhow = "1"
+ed25519-dalek = { version = "2.2", features = ["pkcs8", "pem", "rand_core"] }
+goblin = { version = "0.10", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
+libc = "0.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+signal-hook-registry = "1.4"
+tar = { version = "0.4.46", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
