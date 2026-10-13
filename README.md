@@ -9,6 +9,8 @@ paquet -i nano         # l'installe, avec ses dépendances
 paquet -u              # met tout à jour
 paquet -r nano         # le supprime
 paquet autoremove      # supprime les dépendances devenues inutiles
+paquet -Q /usr/bin/nano  # dit à quel paquet appartient un fichier
+paquet -I nano         # affiche ce que l'on sait d'un paquet
 ```
 
 `pq` est un alias de `paquet` : `pq -i nano`.
@@ -22,7 +24,8 @@ paquet autoremove      # supprime les dépendances devenues inutiles
 ## Documentation
 
 - [Utilisation de paquet](docs/utilisation.md) : configurer le dépôt, installer, mettre à jour, supprimer, réparer.
-- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, construire, construire en chroot.
+- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, styles de construction, construire, construire en chroot.
+- [Scripts et hooks](docs/scripts.md) : scripts d'installation et de suppression, hooks du système (`ldconfig`...).
 - [Générer et publier un dépôt](docs/depot.md) : organisation du miroir, index `PQREPO`, publication.
 - [Signer un dépôt](docs/signature.md) : clés, signature, installation des clés, rotation.
 
@@ -34,7 +37,10 @@ système installé, tient en dix commandes.
 C'est la reprise des scripts `paquet.sh`, `genpqrepo.sh` et `pqmake.sh`. Les
 formats sont les mêmes (index, état local, listes de fichiers, journaux de
 transaction, clés et signatures, archives) : un système, un miroir ou un
-arbre de recettes passe d'une version à l'autre sans conversion.
+arbre de recettes passe d'une version à l'autre sans conversion. Seule
+exception : les scripts de paquets, que les scripts bash ne connaissent pas
+(`paquet.sh` déballerait les fichiers `.PRE-INSTALL`... à la racine sans les
+exécuter).
 
 ## Construction
 
@@ -62,6 +68,9 @@ paquet [OPTION] [--chroot <racine>]
   -r, --remove <paquet>          supprime un paquet dont aucun paquet installé ne dépend
   -u, --upgrade [paquet]         met à jour un paquet, ou tous ceux marqués U (dépendances d'abord)
   -o, --orphans                  liste les dépendances devenues inutiles
+  -Q, --query <fichier>          indique le paquet auquel appartient un fichier
+  -I, --info <paquet>            affiche ce que l'on sait d'un paquet
+  -F, --files <paquet>           liste les fichiers d'un paquet installé
   autoremove, --autoremove       les supprime
   --mark-auto <paquet>           marque un paquet comme installé automatiquement
   --mark-explicit <paquet>       marque un paquet comme installé explicitement
@@ -70,6 +79,7 @@ paquet [OPTION] [--chroot <racine>]
   -C, --cache                    affiche la taille du cache et propose de le vider
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
+  --noscripts                    ne lance ni scripts ni hooks
 ```
 
 États : `N` non installé, `I` installé explicitement, `A` installé
@@ -117,6 +127,9 @@ remplacent ces deux chemins.
   annule l'opération inachevée.
 - Une seule instance modifie un système à la fois (verrou
   `/var/lib/pq/lock`).
+- Les scripts `pre-install` et `pre-remove` d'un paquet peuvent annuler
+  l'opération ; scripts et hooks s'exécutent dans le système géré (chroot),
+  sans fichier temporaire.
 
 ## genpqrepo
 
@@ -160,6 +173,11 @@ manière des recettes CRUX (`name`, `version`, `release`, `source`, fonction
 vont dans `<dépôt>/<ensemble>/`. Une recette dont l'archive existe déjà pour
 sa version et sa release n'est pas reconstruite (sauf `-f`).
 
+- Une recette sans fonction `build()` utilise un style de construction
+  partagé (`build=meson`), cherché dans `<recettes>/styles/` puis
+  `/etc/pqmake/styles/`.
+- Les fichiers `pre-install`, `post-install`, `pre-remove` et `post-remove`
+  de la recette deviennent les scripts du paquet, lancés par `paquet`.
 - Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`, `sources`,
   `locale`) deviennent des sous-paquets `<nom>.<groupe>`.
 - Les dépendances d'exécution sont détectées en lisant les bibliothèques
@@ -175,7 +193,7 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
 
 Les réglages viennent de `~/.config/pqmake` (ou `$PQMAKE_CONFIG`) :
 `RECIPES_DIR`, `REPO_DIR`, `WORK_DIR`, `SOURCES_DIR`, `LOG_DIR`, `MAKEFLAGS`,
-`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `CHROOT`.
+`CFLAGS`, `CXXFLAGS`, `PKGMK_GROUPS`, `STYLES_DIR`, `CHROOT`.
 
 ## Différences avec les scripts bash
 

@@ -37,8 +37,11 @@ exemple `/srv/great-os/stable/x86_64`.
 ## Les archives
 
 Une archive s'appelle `<nom>-<version>-<release>.tar.zst` : une archive tar
-compressée avec zstd, qui contient les fichiers du paquet relativement à `/`
-et un fichier `.META` à la racine :
+compressée avec zstd, qui contient les fichiers du paquet relativement à `/`,
+un fichier `.META` à la racine et, facultativement, les scripts du paquet
+(`.PRE-INSTALL`, `.POST-INSTALL`, `.PRE-REMOVE`, `.POST-REMOVE`, voir
+[Scripts et hooks](scripts.md)). Ces fichiers à la racine ne sont jamais
+déballés dans le système. Le `.META` ressemble à :
 
 ```text
 Description: Dit bonjour

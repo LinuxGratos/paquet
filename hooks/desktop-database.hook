@@ -1,0 +1,4 @@
+# Shipped by the desktop-file-utils package: /etc/pq/hooks/desktop-database.hook
+Description=Updating the desktop file database
+Path=usr/share/applications/*.desktop
+Exec=update-desktop-database -q /usr/share/applications

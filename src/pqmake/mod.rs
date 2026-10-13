@@ -32,18 +32,19 @@ pub fn is_known_group(group: &str) -> bool {
 }
 
 /// Code run before a Pkgfile is used, in a separate bash: the default
-/// `PKGMK_GROUPS`, and the default `build()` of recipes without one (the one
-/// of Great-OS's pkgmk.conf, also used by `build=autotools`). `PQMAKE_GROUPS`
-/// and `PKGMK_ARCH` come from the environment.
+/// `PKGMK_GROUPS`, and the `build()` of recipes without one: their build
+/// style (`$PQMAKE_STYLE_FILE`, see [`Pqmake::find_style`]), or else the
+/// built-in autotools build. `PQMAKE_GROUPS` and `PKGMK_ARCH` come from the
+/// environment.
 pub const RECIPE_PRELUDE: &str = r#"
 read -ra PKGMK_GROUPS <<< "$PQMAKE_GROUPS"
 source "$1" > /dev/null || exit 1
-if [[ "$(type -t build)" != function && -n "${build:-}" && "$build" != autotools ]]; then
+PQMAKE_BUILD_FUNCTION=$(type -t build || true)
+if [[ "$PQMAKE_BUILD_FUNCTION" != function && -n "${PQMAKE_STYLE_FILE:-}" ]]; then
     build() {
-        echo "build=$build is not supported by pqmake" >&2
-        return 1
+        source "$PQMAKE_STYLE_FILE"
     }
-elif [[ "$(type -t build)" != function ]]; then
+elif [[ "$PQMAKE_BUILD_FUNCTION" != function ]]; then
     build() {
         cd "$name-$version"
         ./configure --prefix=/usr
@@ -59,7 +60,7 @@ const RECIPE_FIELDS: &str = r#"
 printf "%s\n" "${name:-}" "${version:-}" "${release:-1}" \
     "${description//$'\n'/ }" "${makedepends[*]}" "${run[*]}" \
     "${run_devel[*]}" "${PKGMK_GROUPS[*]}" "${source[*]}" \
-    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}"
+    "${PKGMK_IGNORE_RUNTIMEDEPS:-no}" "${build:-}" "$PQMAKE_BUILD_FUNCTION"
 "#;
 
 /// Build of a recipe: prepare(), build() and package(), when defined, each
@@ -90,6 +91,8 @@ pub struct Settings {
     pub chroot: Option<PathBuf>,
     /// Groups of a recipe that does not set `PKGMK_GROUPS`.
     pub default_groups: String,
+    /// Shared build styles (`build=<style>`), after `<recipes>/styles`.
+    pub styles_dir: PathBuf,
     pub dry_run: bool,
     pub keep_going: bool,
     pub quiet: bool,
@@ -116,6 +119,7 @@ impl Settings {
             cxxflags: String::new(),
             chroot: None,
             default_groups: "devel man doc service sources".into(),
+            styles_dir: "/etc/pqmake/styles".into(),
             dry_run: false,
             keep_going: false,
             quiet: false,
@@ -145,6 +149,7 @@ impl Settings {
                 "CFLAGS" => self.cflags = value,
                 "CXXFLAGS" => self.cxxflags = value,
                 "PKGMK_GROUPS" => self.default_groups = value,
+                "STYLES_DIR" => self.styles_dir = value.into(),
                 "CHROOT" => self.chroot = Some(value.into()).filter(|p: &PathBuf| !p.as_os_str().is_empty()),
                 _ => eprintln!("Warning: ignoring unknown setting {key} in {}", path.display()),
             }
@@ -165,6 +170,8 @@ pub struct Recipe {
     pub groups: Vec<String>,
     pub sources: Vec<String>,
     pub no_rtdeps: bool,
+    /// Build style file, for a recipe without build() function
+    pub style: Option<PathBuf>,
 }
 
 pub struct Pqmake {
@@ -287,12 +294,13 @@ impl Pqmake {
             .env("PQMAKE_GROUPS", &self.s.default_groups)
             .env("PKGMK_ARCH", &self.arch)
             .env("PKGMK_ROOT", &dir)
+            .env_remove("PQMAKE_STYLE_FILE")
             .stdin(std::process::Stdio::null())
             .output()
             .context("unable to run bash")?;
         let text = String::from_utf8_lossy(&output.stdout);
         let fields: Vec<&str> = text.lines().collect();
-        if fields.len() != 10 {
+        if fields.len() != 12 {
             bail!("cannot read {}.", pkgfile.display());
         }
         // "-" separates the fields of an archive name: 1.3-20240619 becomes
@@ -319,6 +327,7 @@ impl Pqmake {
                 );
             }
         }
+        let style = if fields[11] == "function" { None } else { self.find_style(fields[10], &pkgfile)? };
         let words = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         self.recipes.insert(
             name.to_string(),
@@ -332,9 +341,35 @@ impl Pqmake {
                 groups,
                 sources: words(fields[8]),
                 no_rtdeps: fields[9] == "yes",
+                style,
             },
         );
         Ok(())
+    }
+
+    /// Build style of a recipe without build() function: `build=<style>`, or
+    /// `default` when unset. The style is a bash file whose commands make the
+    /// build() of the recipe, looked up in `<recipes>/styles/` then in
+    /// `STYLES_DIR`. Without a style file, `default` and `autotools` use the
+    /// built-in autotools build.
+    pub fn find_style(&self, build: &str, pkgfile: &Path) -> Result<Option<PathBuf>> {
+        let style = if build.is_empty() { "default" } else { build };
+        if !is_valid_name(style) {
+            bail!("{}: invalid build style '{style}'.", pkgfile.display());
+        }
+        let dirs = [self.s.recipes_dir.join("styles"), self.s.styles_dir.clone()];
+        if let Some(file) = dirs.iter().map(|d| d.join(style)).find(|f| f.is_file()) {
+            return Ok(Some(file));
+        }
+        if matches!(style, "default" | "autotools") {
+            return Ok(None);
+        }
+        bail!(
+            "{}: build style '{style}' not found (looked in {} and {}).",
+            pkgfile.display(),
+            dirs[0].display(),
+            dirs[1].display()
+        )
     }
 
     pub fn recipe(&self, name: &str) -> &Recipe {
@@ -606,7 +641,7 @@ pub fn display_help(prog: &str, config_file: &Path) {
     println!();
     println!("Settings are read from {} (KEY=value lines):", config_file.display());
     println!("  RECIPES_DIR, REPO_DIR, WORK_DIR, SOURCES_DIR, LOG_DIR, MAKEFLAGS, CFLAGS,");
-    println!("  CXXFLAGS, PKGMK_GROUPS, CHROOT");
+    println!("  CXXFLAGS, PKGMK_GROUPS, STYLES_DIR, CHROOT");
 }
 
 /// Entry point of the `pqmake` command.

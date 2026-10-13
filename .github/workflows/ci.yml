@@ -15,3 +15,5 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+      # Again as root: package scripts and hooks run in a chroot
+      - run: sudo -E env "PATH=$PATH" cargo test

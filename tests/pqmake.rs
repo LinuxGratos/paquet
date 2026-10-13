@@ -214,3 +214,72 @@ fn reports_cycles_and_failures() {
     let r = pqmake(&env, &["nothere"]);
     assert!(r.all().contains("no recipe named nothere"), "{}", r.all());
 }
+
+#[test]
+fn scripts_and_build_styles() {
+    let env = Env::new();
+    // A shared style, versioned with the recipes
+    fs::create_dir_all(env.path("recipes/styles")).unwrap();
+    fs::write(
+        env.path("recipes/styles/copy"),
+        "mkdir -p \"$PKG/usr/share/$name\"\necho \"built by the copy style\" > \"$PKG/usr/share/$name/how\"\n",
+    )
+    .unwrap();
+    // A default style replaces the built-in autotools build
+    fs::write(
+        env.path("recipes/styles/default"),
+        "mkdir -p \"$PKG/usr/share/$name\"\ntouch \"$PKG/usr/share/$name/default\"\n",
+    )
+    .unwrap();
+    // Another one in STYLES_DIR
+    fs::create_dir_all(env.path("shared-styles")).unwrap();
+    fs::write(env.path("shared-styles/shared"), "mkdir -p \"$PKG/shared\"\ntouch \"$PKG/shared/ok\"\n").unwrap();
+    fs::write(
+        env.path("pqmake.conf"),
+        format!(
+            "RECIPES_DIR={}\nREPO_DIR={}\nWORK_DIR={}\nSOURCES_DIR={}\nLOG_DIR={}\nSTYLES_DIR={}\n",
+            env.path("recipes").display(),
+            env.repo_dir().display(),
+            env.path("work").display(),
+            env.path("sources").display(),
+            env.path("logs").display(),
+            env.path("shared-styles").display()
+        ),
+    )
+    .unwrap();
+    recipe(&env, "base", "sharedstyle", "name=sharedstyle\nversion=1\nbuild=shared\n");
+    recipe(&env, "base", "styled", "name=styled\nversion=1\nbuild=copy\n");
+    recipe(&env, "base", "plain", "name=plain\nversion=1\n");
+    recipe(&env, "base", "own", "name=own\nversion=1\nbuild=copy\nbuild() { mkdir -p $PKG/own; touch $PKG/own/f; }\n");
+    for (script, content) in [("post-install", "echo installed\n"), ("pre-remove", "echo removing\n")] {
+        fs::write(env.path(&format!("recipes/base/styled/{script}")), content).unwrap();
+    }
+
+    let r = pqmake(&env, &["-q", "styled", "plain", "own", "sharedstyle"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("with its post-install script"), "{}", r.stdout);
+    let repo = env.repo_dir();
+    let names = |archive: &str| -> Vec<String> {
+        paquet::archive::list(&repo.join(archive))
+            .unwrap()
+            .iter()
+            .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+            .collect()
+    };
+    let styled = names("base/styled-1-1.tar.zst");
+    assert!(styled.contains(&"usr/share/styled/how".to_string()), "{styled:?}");
+    assert!(styled.contains(&".POST-INSTALL".to_string()) && styled.contains(&".PRE-REMOVE".to_string()));
+    assert!(!styled.contains(&".PRE-INSTALL".to_string()));
+    let scripts = paquet::archive::read_metadata(&repo.join("base/styled-1-1.tar.zst"), &[".POST-INSTALL"]).unwrap();
+    assert_eq!(scripts[".POST-INSTALL"], b"echo installed\n");
+    assert!(names("base/plain-1-1.tar.zst").contains(&"usr/share/plain/default".to_string()));
+    assert!(names("base/sharedstyle-1-1.tar.zst").contains(&"shared/ok".to_string()));
+    // A build() function wins over build=
+    assert!(names("base/own-1-1.tar.zst").contains(&"own/f".to_string()));
+
+    // An unknown style is reported when the plan is made
+    recipe(&env, "base", "lost", "name=lost\nversion=1\nbuild=nosuchstyle\n");
+    let r = pqmake(&env, &["-n", "lost"]);
+    assert!(!r.ok());
+    assert!(r.all().contains("build style 'nosuchstyle' not found"), "{}", r.all());
+}

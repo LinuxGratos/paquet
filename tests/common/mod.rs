@@ -156,6 +156,30 @@ impl Env {
         self.cmd_env("paquet", &all, input, extra)
     }
 
+    /// Gives the managed root a working /bin/sh (the host's, with its
+    /// libraries), so that package scripts and hooks can run in it. Needs
+    /// root (for chroot): returns false, and the test should stop, otherwise.
+    pub fn shell_root(&self) -> bool {
+        if paquet::util::euid() != 0 {
+            eprintln!("not running as root: scripts cannot run in a chroot, test skipped");
+            return false;
+        }
+        let Ok(sh) = fs::canonicalize("/bin/sh") else { return false };
+        let Ok(ldd) = Command::new("ldd").arg(&sh).output() else { return false };
+        let mut files = vec![(sh, PathBuf::from("bin/sh"))];
+        for word in String::from_utf8_lossy(&ldd.stdout).split_whitespace() {
+            if let Some(rel) = word.strip_prefix('/') {
+                files.push((PathBuf::from(word), PathBuf::from(rel)));
+            }
+        }
+        for (src, rel) in files {
+            let dest = self.root().join(rel);
+            fs::create_dir_all(dest.parent().unwrap()).unwrap();
+            fs::copy(&src, &dest).unwrap();
+        }
+        true
+    }
+
     /// Status of a package in the state of the managed root ("" if absent).
     pub fn status(&self, name: &str) -> String {
         let state = fs::read_to_string(self.rootpath("var/lib/pq/PQREPOSTATE")).unwrap_or_default();

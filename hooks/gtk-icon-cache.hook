@@ -1,0 +1,4 @@
+# Shipped by the gtk package: /etc/pq/hooks/gtk-icon-cache.hook
+Description=Updating the icon theme caches
+Path=usr/share/icons/*
+Exec=for theme in /usr/share/icons/*/; do [ -f "$theme/index.theme" ] && gtk-update-icon-cache -q -t -f "$theme"; done; true

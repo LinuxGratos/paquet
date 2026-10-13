@@ -96,7 +96,7 @@ pub fn prepare(archive_path: &Path, owned: Option<&[u8]>, target_root: &[u8]) ->
 
     for item in &listing {
         let entry = item.name.as_slice();
-        if entry.is_empty() || entry == b"." || entry == b".META" {
+        if entry.is_empty() || entry == b"." || archive::is_metadata(entry) {
             continue;
         }
         if archive::escapes_root(entry) {

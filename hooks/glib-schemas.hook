@@ -1,0 +1,5 @@
+# Shipped by the glib package: /etc/pq/hooks/glib-schemas.hook
+Description=Compiling the GSettings schemas
+Path=usr/share/glib-2.0/schemas/*.gschema.xml
+Path=usr/share/glib-2.0/schemas/*.gschema.override
+Exec=glib-compile-schemas /usr/share/glib-2.0/schemas

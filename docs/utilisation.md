@@ -6,8 +6,8 @@
 
 Les commandes qui modifient le système (`--sync`, `-i`, `-r`, `-u`,
 `autoremove`, `--mark-*`, `-C`, `--purge-old-cache`, `--recover`) doivent être
-lancées en root. Les autres (`-l`, `-s`, `-o`, `--cache-info`) peuvent l'être
-par n'importe quel utilisateur.
+lancées en root. Les autres (`-l`, `-s`, `-o`, `-Q`, `-I`, `-F`,
+`--cache-info`) peuvent l'être par n'importe quel utilisateur.
 
 ## Configuration
 
@@ -160,6 +160,73 @@ paquet --mark-auto libsalut        # I -> A
 `paquet -i` sur un paquet déjà installé comme dépendance le marque aussi comme
 installé explicitement.
 
+### Consulter
+
+`paquet -I` affiche ce que l'on sait d'un paquet, installé ou non :
+
+```console
+$ paquet -I salut
+Name           : salut
+Version        : 0.3-3
+Description    : Dit bonjour
+Set            : extra
+Folder         : extra
+Groups         : -
+Depends        : libsalut
+Status         : I (installed explicitly)
+Required by    : -
+Files          : 2
+Installed size : 47 B
+Scripts        : -
+```
+
+Pour un paquet installé s'ajoutent les paquets installés qui en dépendent
+(`Required by`), le nombre de fichiers, la place occupée et ses scripts
+(voir [Scripts et hooks](scripts.md)). Si une mise à jour est disponible, la
+ligne `Available` donne la nouvelle version.
+
+`paquet -Q` dit à quel paquet appartient un fichier, `paquet -F` liste les
+fichiers d'un paquet installé :
+
+```console
+$ paquet -Q /usr/lib/libsalut.so.1
+/usr/lib/libsalut.so.1 is owned by libsalut 1.2-1
+$ paquet -F salut
+/etc
+/etc/salut.conf
+/usr/bin
+/usr/bin/salut
+```
+
+Le chemin donné à `-Q` peut être relatif (au répertoire courant) ou passer
+par un lien symbolique (`/lib/libz.so.1` quand `/lib` pointe vers
+`usr/lib`). Un fichier qui n'appartient à aucun paquet fait échouer la
+commande. `-F` liste les répertoires que le paquet a créés en plus de ses
+fichiers.
+
+## Scripts et hooks
+
+Un paquet peut fournir des scripts, lancés avant ou après son installation,
+sa mise à jour ou sa suppression (créer l'utilisateur d'un service, par
+exemple). Le système peut avoir des hooks, dans `/etc/pq/hooks/`, lancés une
+fois à la fin d'une commande quand des fichiers qui les concernent ont été
+installés ou supprimés (`ldconfig` après l'installation de bibliothèques,
+par exemple) :
+
+```text
+Running the post-install script of serveur...
+Running hook: Updating the shared library cache
+```
+
+Un script `pre-install` ou `pre-remove` qui échoue annule l'opération. Un
+script `post-install` ou `post-remove`, ou un hook, qui échoue est signalé et
+fait échouer la commande, mais l'opération reste faite. `--noscripts` (avec
+`-i`, `-r`, `-u` et `autoremove`) ne lance ni scripts ni hooks : à réserver au
+dépannage, puisque le paquet peut alors rester incomplet (un utilisateur
+non créé, un cache non mis à jour).
+
+Le détail est dans [Scripts et hooks](scripts.md).
+
 ## Les états
 
 `paquet -l` et `paquet -s` affichent l'état de chaque paquet :
@@ -234,7 +301,11 @@ paquet -i base --chroot /mnt/great-os
 
 Les fichiers sont installés sous la racine, et toute la base de paquets est
 prise sous `<racine>/var/lib/pq/`. La configuration (`/etc/pq.conf`) et les
-clés (`/etc/pq/keys/`) restent celles du système qui lance la commande.
+clés (`/etc/pq/keys/`) restent celles du système qui lance la commande. Les
+scripts des paquets et les hooks (ceux de `<racine>/etc/pq/hooks/`)
+s'exécutent dans la racine, avec `chroot` : il faut donc être root, et la
+racine doit avoir un `/bin/sh` (sinon ils sont sautés, avec un
+avertissement).
 
 ## Référence
 
@@ -248,6 +319,9 @@ paquet [OPTION] [--chroot <racine>]
   -r, --remove <paquet>          supprime un paquet dont aucun paquet installé ne dépend
   -u, --upgrade [paquet]         met à jour un paquet, ou tous ceux marqués U
   -o, --orphans                  liste les dépendances devenues inutiles
+  -Q, --query <fichier>          indique le paquet auquel appartient un fichier
+  -I, --info <paquet>            affiche ce que l'on sait d'un paquet
+  -F, --files <paquet>           liste les fichiers d'un paquet installé
   autoremove, --autoremove       les supprime
   --mark-auto <paquet>           marque un paquet comme installé automatiquement
   --mark-explicit <paquet>       marque un paquet comme installé explicitement
@@ -256,6 +330,7 @@ paquet [OPTION] [--chroot <racine>]
   -C, --cache                    affiche la taille du cache et propose de le vider
   --recover                      annule une opération interrompue par un plantage
   --chroot <racine>              gère le système installé sous <racine>
+  --noscripts                    ne lance ni scripts ni hooks (avec -i, -r, -u, autoremove)
   -h, --help                     affiche l'aide
 ```
 
@@ -272,6 +347,8 @@ le miroir ou le trafic réseau peut faire installer ce qu'il veut.
 | `/var/lib/pq/files/<paquet>` | fichiers installés par chaque paquet |
 | `/var/lib/pq/cache/` | archives téléchargées |
 | `/var/lib/pq/transaction/` | journaux des opérations en cours |
+| `/var/lib/pq/scripts/<paquet>/` | scripts des paquets installés |
+| `/etc/pq/hooks/*.hook` | hooks du système |
 | `/var/lib/pq/lock` | verrou |
 
 Codes de sortie : `0` succès, `1` erreur, `130` ou `143` interruption

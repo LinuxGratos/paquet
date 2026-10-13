@@ -320,6 +320,19 @@ impl Pqmake {
         }
         fs::write(root.join(".META"), meta)?;
         fs::set_permissions(root.join(".META"), fs::Permissions::from_mode(0o644))?;
+        // The scripts of the recipe (pre-install, post-install, pre-remove,
+        // post-remove) go with its main package
+        if pkgname == name {
+            let recipe_dir = self.recipe_path[name].parent().unwrap_or(Path::new("."));
+            for (script, entry) in archive::SCRIPTS {
+                if recipe_dir.join(script).is_file() {
+                    fs::copy(recipe_dir.join(script), root.join(entry))
+                        .with_context(|| format!("unable to add the {script} script"))?;
+                    fs::set_permissions(root.join(entry), fs::Permissions::from_mode(0o644))?;
+                    println!("  with its {script} script");
+                }
+            }
+        }
         if let Some(dir) = archive_path.parent() {
             fs::create_dir_all(dir)?;
         }

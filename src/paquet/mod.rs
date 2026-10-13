@@ -11,14 +11,17 @@
 //! | `/var/lib/pq/files/<package>` | files installed by a package |
 //! | `/var/lib/pq/cache/` | downloaded archives |
 //! | `/var/lib/pq/transaction/` | journals of the operations in progress |
+//! | `/var/lib/pq/scripts/<package>/` | scripts of an installed package |
+//! | `/etc/pq/hooks/*.hook` | hooks run after installs and removals |
 //!
 //! The configuration and the trusted keys always come from the running
 //! system; `PQ_CONFIG` and `PQ_KEYS_DIR` override their paths.
 
 pub mod cli;
 pub mod filelist;
+pub mod scripts;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
@@ -32,6 +35,7 @@ use crate::util::{
     sha256_file, with_suffix,
 };
 use crate::{archive, fetch, sign, signals, version};
+use scripts::Op;
 
 /// Locations of the files of a managed system.
 #[derive(Clone, Debug)]
@@ -44,6 +48,8 @@ pub struct Paths {
     pub cache_dir: PathBuf,
     pub lock_file: PathBuf,
     pub txn_dir: PathBuf,
+    pub scripts_dir: PathBuf,
+    pub hooks_dir: PathBuf,
     /// Root of the managed system: empty for the running system.
     pub target_root: Vec<u8>,
 }
@@ -62,6 +68,8 @@ impl Paths {
             cache_dir: "/var/lib/pq/cache".into(),
             lock_file: "/var/lib/pq/lock".into(),
             txn_dir: "/var/lib/pq/transaction".into(),
+            scripts_dir: "/var/lib/pq/scripts".into(),
+            hooks_dir: "/etc/pq/hooks".into(),
             target_root: Vec::new(),
         }
     }
@@ -80,6 +88,8 @@ impl Paths {
             &mut self.cache_dir,
             &mut self.lock_file,
             &mut self.txn_dir,
+            &mut self.scripts_dir,
+            &mut self.hooks_dir,
         ] {
             *path = concat_path(&root, path.as_os_str().as_bytes());
         }
@@ -101,8 +111,14 @@ pub struct Paquet {
     pub arch: String,
     /// `--nosign`: `--sync` skips the signature check of the index.
     pub nosign: bool,
+    /// `--noscripts`: package scripts and hooks are not run.
+    pub noscripts: bool,
     /// Name the program was called with, for messages.
     pub prog: String,
+    /// Paths installed or removed by the command, for the hooks.
+    touched: Vec<(Vec<u8>, Op)>,
+    /// A script or a hook failed after its package was committed.
+    script_failed: bool,
     repo: Records,
     state: Records,
     /// Journal of the operation in progress.
@@ -128,7 +144,10 @@ impl Paquet {
             branch,
             arch,
             nosign: false,
+            noscripts: false,
             prog,
+            touched: Vec::new(),
+            script_failed: false,
             repo: Records::default(),
             state: Records::default(),
             txn: None,
@@ -539,6 +558,12 @@ impl Paquet {
                 paths.push((false, real));
             }
         }
+        // The stored scripts of the package
+        let scripts_dir = scripts::package_dir(&self.paths.scripts_dir, pkg);
+        for (name, _) in archive::SCRIPTS {
+            paths.push((true, scripts_dir.join(name)));
+        }
+        paths.push((true, scripts_dir));
 
         let mut seen = HashSet::new();
         let mut n = 0;
@@ -767,12 +792,17 @@ impl Paquet {
         // nothing behind.
         let new_list = filelist::prepare(&archive_path, None, &self.paths.target_root)
             .with_context(|| format!("Aborting installation of {name}."))?;
+        let package_scripts = read_scripts(&archive_path)?;
+        let version = format!("{}-{}", record.version, record.release);
 
         // From here on, any failure restores the system as it was
         let result = (|| -> Result<()> {
             self.begin_transaction(name, &new_list, None)?;
+            self.run_script(name, &package_scripts, "pre-install", &["install", &version])
+                .with_context(|| format!("installation of {name} cancelled"))?;
             println!("Extracting package files...");
             self.extract_package(&archive_path).with_context(|| format!("extraction failed, rolling back {name}"))?;
+            self.store_scripts(name, &package_scripts)?;
             util::atomic_write(&list_path, &new_list)?;
             self.set_state(record.with_status(reason))?;
             Ok(())
@@ -782,7 +812,9 @@ impl Paquet {
             return Err(err);
         }
         self.commit_transaction()?;
+        self.touch(&new_list, Op::Install);
         println!("{name} installed successfully!");
+        self.run_late_script(name, &package_scripts, "post-install", &["install", &version]);
         Ok(())
     }
 
@@ -831,16 +863,23 @@ impl Paquet {
         let old_list = fs::read(&list_path)?;
         let new_list = filelist::prepare(&archive_path, Some(&old_list), &self.paths.target_root)
             .with_context(|| format!("Aborting upgrade of {name}."))?;
+        let package_scripts = read_scripts(&archive_path)?;
+        let version = format!("{}-{}", record.version, record.release);
+        let old_version = self.state.get(name).map(|r| format!("{}-{}", r.version, r.release)).unwrap_or_default();
+        let stale = filelist::stale(&old_list, &new_list);
 
         // From here on, any failure restores the previous version
         let result = (|| -> Result<()> {
             self.begin_transaction(name, &new_list, Some(&old_list))?;
+            self.run_script(name, &package_scripts, "pre-install", &["upgrade", &version, &old_version])
+                .with_context(|| format!("upgrade of {name} cancelled"))?;
             println!("Extracting package files...");
             self.extract_package(&archive_path)
                 .with_context(|| format!("extraction failed while upgrading {name}, rolling back"))?;
             // Drop the files the new version no longer ships
-            filelist::remove_files(&filelist::stale(&old_list, &new_list), &self.paths.target_root);
+            filelist::remove_files(&stale, &self.paths.target_root);
             self.test_interrupt_point("after-stale")?;
+            self.store_scripts(name, &package_scripts)?;
             // Keep I or A
             let status: String = local_status.chars().filter(|c| !matches!(c, 'U' | 'X')).collect();
             util::atomic_write(&list_path, &new_list)?;
@@ -852,7 +891,10 @@ impl Paquet {
             return Err(err);
         }
         self.commit_transaction()?;
+        self.touch(&new_list, Op::Install);
+        self.touch(&stale, Op::Remove);
         println!("{name} upgraded successfully!");
+        self.run_late_script(name, &package_scripts, "post-install", &["upgrade", &version, &old_version]);
         Ok(())
     }
 
@@ -912,8 +954,24 @@ impl Paquet {
             }
         }
 
+        // A failing pre-remove script cancels the removal; the post-remove
+        // one runs once the files are gone
+        let scripts_dir = scripts::package_dir(&self.paths.scripts_dir, name);
+        let mut package_scripts = HashMap::new();
+        for script in ["pre-remove", "post-remove"] {
+            if let Ok(content) = fs::read(scripts_dir.join(script)) {
+                package_scripts.insert(script.to_string(), content);
+            }
+        }
+        let version = self.state.get(name).map(|r| format!("{}-{}", r.version, r.release)).unwrap_or_default();
+        self.run_script(name, &package_scripts, "pre-remove", &["remove", &version])
+            .with_context(|| format!("removal of {name} cancelled"))?;
+
         let list = fs::read(&list_path)?;
         filelist::remove_files(&list, &self.paths.target_root);
+        if exists_or_symlink(&scripts_dir) {
+            fs::remove_dir_all(&scripts_dir).with_context(|| format!("unable to remove {}", scripts_dir.display()))?;
+        }
 
         // Not installed any more, keeping the repository record
         if let Some(local) = self.state.get(name).cloned() {
@@ -929,7 +987,9 @@ impl Paquet {
         // The file list goes last: an interrupted removal can simply be run
         // again
         fs::remove_file(&list_path)?;
+        self.touch(&list, Op::Remove);
         println!("{name} removed successfully!");
+        self.run_late_script(name, &package_scripts, "post-remove", &["remove", &version]);
 
         if !skip_check {
             let orphans = self.find_orphans();
@@ -982,6 +1042,229 @@ impl Paquet {
             }
         }
         if failed { Err(crate::Reported.into()) } else { Ok(()) }
+    }
+
+    // ---------------------------------------------------------------------
+    // Scripts and hooks
+
+    /// Stores the scripts of a package in `/var/lib/pq/scripts/<package>/`,
+    /// replacing those of the previous version (inside its transaction).
+    fn store_scripts(&self, pkg: &str, package_scripts: &HashMap<String, Vec<u8>>) -> Result<()> {
+        let dir = scripts::package_dir(&self.paths.scripts_dir, pkg);
+        for (name, _) in archive::SCRIPTS {
+            let path = dir.join(name);
+            if exists_or_symlink(&path) {
+                fs::remove_file(&path).with_context(|| format!("unable to remove {}", path.display()))?;
+            }
+        }
+        if package_scripts.is_empty() {
+            let _ = fs::remove_dir(&dir);
+            return Ok(());
+        }
+        fs::create_dir_all(&dir).with_context(|| format!("unable to create {}", dir.display()))?;
+        for (name, content) in package_scripts {
+            util::atomic_write(&dir.join(name), content)?;
+        }
+        Ok(())
+    }
+
+    /// Runs a script of a package, if it has one. Fails if the script fails.
+    /// Scripts are skipped with `--noscripts`, or when the managed system has
+    /// no `/bin/sh` yet (while it is being bootstrapped).
+    fn run_script(
+        &self,
+        pkg: &str,
+        package_scripts: &HashMap<String, Vec<u8>>,
+        kind: &str,
+        args: &[&str],
+    ) -> Result<()> {
+        let Some(content) = package_scripts.get(kind) else { return Ok(()) };
+        if self.noscripts {
+            println!("Skipping the {kind} script of {pkg} (--noscripts)");
+            return Ok(());
+        }
+        let root = self.paths.root_dir();
+        let Some(cmd) = scripts::shell(&self.paths.target_root, &root) else {
+            println!("Warning: no /bin/sh in {}, the {kind} script of {pkg} is skipped", root.display());
+            return Ok(());
+        };
+        println!("Running the {kind} script of {pkg}...");
+        scripts::run(cmd, content, &format!("{pkg}.{kind}"), args, &[("PQ_PACKAGE", pkg)])
+            .with_context(|| format!("the {kind} script of {pkg} failed"))
+    }
+
+    /// Runs a script once its package is committed: a failure is reported,
+    /// and makes the command fail, but the operation stays done.
+    fn run_late_script(&mut self, pkg: &str, package_scripts: &HashMap<String, Vec<u8>>, kind: &str, args: &[&str]) {
+        if let Err(err) = self.run_script(pkg, package_scripts, kind, args) {
+            util::report(&err);
+            self.script_failed = true;
+        }
+    }
+
+    /// Records the paths of a file list for the hooks.
+    fn touch(&mut self, list: &[u8], op: Op) {
+        for (path, _) in filelist::entries(list, &self.paths.target_root) {
+            self.touched.push((path, op));
+        }
+    }
+
+    /// Runs the hooks triggered by the files installed or removed so far,
+    /// once each.
+    pub fn run_hooks(&mut self) {
+        let touched = std::mem::take(&mut self.touched);
+        if touched.is_empty() || self.noscripts {
+            return;
+        }
+        let root = self.paths.root_dir();
+        for hook in scripts::load_hooks(&self.paths.hooks_dir) {
+            if !hook.triggered_by(&touched) {
+                continue;
+            }
+            let label = if hook.description.is_empty() { hook.name.clone() } else { hook.description.clone() };
+            let Some(cmd) = scripts::shell(&self.paths.target_root, &root) else {
+                println!("Warning: no /bin/sh in {}, hook {} skipped", root.display(), hook.name);
+                continue;
+            };
+            println!("Running hook: {label}");
+            if let Err(err) = scripts::run(cmd, hook.exec.as_bytes(), &hook.name, &[], &[]) {
+                util::report(&err.context(format!("hook {} failed", hook.name)));
+                self.script_failed = true;
+            }
+        }
+    }
+
+    /// True if a script or a hook failed after its package was committed.
+    pub fn scripts_failed(&self) -> bool {
+        self.script_failed
+    }
+
+    // ---------------------------------------------------------------------
+    // Queries
+
+    /// A path given on the command line, absolute and normalized, relative
+    /// to the managed system (`--chroot`).
+    fn system_path(&self, arg: &str) -> Vec<u8> {
+        let mut joined = Vec::new();
+        if !arg.starts_with('/') && self.paths.target_root.is_empty() {
+            if let Ok(cwd) = std::env::current_dir() {
+                joined.extend_from_slice(cwd.as_os_str().as_bytes());
+            }
+        }
+        joined.push(b'/');
+        joined.extend_from_slice(arg.as_bytes());
+        let mut parts: Vec<&[u8]> = Vec::new();
+        for part in joined.split(|&b| b == b'/') {
+            match part {
+                b"" | b"." => {}
+                b".." => {
+                    parts.pop();
+                }
+                _ => parts.push(part),
+            }
+        }
+        let mut out = Vec::new();
+        for part in &parts {
+            out.push(b'/');
+            out.extend_from_slice(part);
+        }
+        if out.is_empty() {
+            out.push(b'/');
+        }
+        out
+    }
+
+    /// Shows the packages owning a file.
+    pub fn query(&mut self, arg: &str) -> Result<()> {
+        self.load_state();
+        let wanted = self.system_path(arg);
+        let mut candidates = vec![wanted.clone()];
+        // Also through symlinks: /bin/ls may be /usr/bin/ls in the lists
+        let root = self.paths.root_dir();
+        if let (Ok(real), Ok(root_real)) =
+            (fs::canonicalize(concat_path(&self.paths.target_root, &wanted)), fs::canonicalize(&root))
+        {
+            if let Ok(rel) = real.strip_prefix(&root_real) {
+                let mut path = b"/".to_vec();
+                path.extend_from_slice(rel.as_os_str().as_bytes());
+                if !candidates.contains(&path) {
+                    candidates.push(path);
+                }
+            }
+        }
+        let mut owners = Vec::new();
+        for list in util::files_with_suffix(&self.paths.files_dir, "") {
+            let pkg = list.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let content = fs::read(&list).unwrap_or_default();
+            if let Some((path, _)) =
+                filelist::entries(&content, &self.paths.target_root).into_iter().find(|(p, _)| candidates.contains(p))
+            {
+                owners.push((pkg, path));
+            }
+        }
+        if owners.is_empty() {
+            bail!("no package owns {arg}.");
+        }
+        for (pkg, path) in owners {
+            let version = self.state.get(&pkg).map(|r| format!(" {}-{}", r.version, r.release)).unwrap_or_default();
+            println!("{} is owned by {pkg}{version}", concat_path(&self.paths.target_root, &path).display());
+        }
+        Ok(())
+    }
+
+    /// Lists the files of an installed package.
+    pub fn files(&self, name: &str) -> Result<()> {
+        let list =
+            fs::read(self.paths.files_dir.join(name)).map_err(|_| anyhow!("Package {name} is not installed."))?;
+        for (_, real) in filelist::entries(&list, &self.paths.target_root) {
+            println!("{}", real.display());
+        }
+        Ok(())
+    }
+
+    /// Shows what is known about a package, installed or not.
+    pub fn info(&mut self, name: &str) -> Result<()> {
+        self.load_state();
+        self.load_repo();
+        let local = self.state.get(name).filter(|r| r.is_installed()).cloned();
+        let remote = self.repo.get(name).cloned();
+        let Some(record) = local.clone().or_else(|| remote.clone()) else {
+            bail!("Package {name} not found.");
+        };
+        let status = self.state.get(name).map(|r| r.status.clone()).unwrap_or_else(|| "N".into());
+        let or_dash = |s: &str| if s.is_empty() { "-".to_string() } else { s.to_string() };
+        let row = |label: &str, value: &str| println!("{label:<15}: {value}");
+        row("Name", &record.name);
+        row("Version", &format!("{}-{}", record.version, record.release));
+        row("Description", &or_dash(&record.description));
+        row("Set", &or_dash(&record.set));
+        row("Folder", &or_dash(&record.folder));
+        row("Groups", &or_dash(&record.groups));
+        row("Depends", &or_dash(&record.depends));
+        row("Status", &describe_status(&status));
+        if let (true, Some(remote)) = (status.contains('U'), &remote) {
+            row("Available", &format!("{}-{}", remote.version, remote.release));
+        }
+        if local.is_some() {
+            row("Required by", &or_dash(&self.installed_dependents(name).join(" ")));
+            let list = fs::read(self.paths.files_dir.join(name)).unwrap_or_default();
+            let (mut files, mut size) = (0, 0);
+            for (_, real) in filelist::entries(&list, &self.paths.target_root) {
+                if let Ok(meta) = fs::symlink_metadata(&real) {
+                    if !meta.is_dir() {
+                        files += 1;
+                        size += meta.len();
+                    }
+                }
+            }
+            row("Files", &files.to_string());
+            row("Installed size", &if size < 1024 { format!("{size} B") } else { util::human_size(size) });
+            let dir = scripts::package_dir(&self.paths.scripts_dir, name);
+            let stored: Vec<&str> =
+                archive::SCRIPTS.iter().map(|(n, _)| *n).filter(|n| dir.join(n).is_file()).collect();
+            row("Scripts", &or_dash(&stored.join(" ")));
+        }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------
@@ -1089,4 +1372,33 @@ fn dir_usage(path: &Path) -> u64 {
         }
     }
     total
+}
+
+/// Scripts of an archive, by name (`pre-install`...).
+fn read_scripts(archive_path: &Path) -> Result<HashMap<String, Vec<u8>>> {
+    let entries: Vec<&str> = archive::SCRIPTS.iter().map(|(_, e)| *e).collect();
+    let found = archive::read_metadata(archive_path, &entries)?;
+    Ok(archive::SCRIPTS
+        .iter()
+        .filter_map(|(name, entry)| found.get(*entry).map(|c| (name.to_string(), c.clone())))
+        .collect())
+}
+
+/// A status in words: "I (installed explicitly, update available)".
+fn describe_status(status: &str) -> String {
+    let mut words = Vec::new();
+    if status.contains('I') {
+        words.push("installed explicitly");
+    } else if status.contains('A') {
+        words.push("installed as a dependency");
+    } else {
+        words.push("not installed");
+    }
+    if status.contains('U') {
+        words.push("update available");
+    }
+    if status.contains('X') {
+        words.push("no longer in the repository");
+    }
+    format!("{status} ({})", words.join(", "))
 }

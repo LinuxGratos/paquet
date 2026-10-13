@@ -3,7 +3,8 @@
 | Document | Pour qui | Contenu |
 |---|---|---|
 | [Utilisation de paquet](utilisation.md) | administrateurs d'un système Great-OS | configurer le dépôt, installer, mettre à jour, supprimer, réparer |
-| [Construire des paquets avec pqmake](pqmake.md) | empaqueteurs | écrire une recette (`Pkgfile`), construire, construire en chroot |
+| [Construire des paquets avec pqmake](pqmake.md) | empaqueteurs | écrire une recette (`Pkgfile`), styles de construction, construire, construire en chroot |
+| [Scripts et hooks](scripts.md) | empaqueteurs, administrateurs | scripts d'installation et de suppression d'un paquet, hooks du système (`ldconfig`...) |
 | [Générer et publier un dépôt](depot.md) | mainteneurs d'un miroir | organisation du miroir, index `PQREPO`, publication, branches |
 | [Signer un dépôt](signature.md) | mainteneurs d'un miroir | clés, signature de l'index, installation des clés, rotation |
 
