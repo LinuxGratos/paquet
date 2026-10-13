@@ -74,14 +74,16 @@ impl Env {
             fs::create_dir_all(full.parent().unwrap()).unwrap();
             fs::write(&full, content).unwrap();
         }
-        let mut meta = format!("Description: The {name} package\nGroups: \nSet: {folder}\n");
+        // nano.fr and nano.devel are subpackages
+        let group = paquet::util::split_group(name).map(|(_, g)| g).unwrap_or("");
+        let mut meta = format!("Description: The {name} package\nGroups: {group}\nSet: {folder}\n");
         if !depends.is_empty() {
             meta.push_str(&format!("Depends: {depends}\n"));
         }
         fs::write(stage.join(".META"), meta).unwrap();
         let dir = self.repo_dir().join(folder);
         fs::create_dir_all(&dir).unwrap();
-        let archive = dir.join(paquet::util::archive_file_name(name, version, "1"));
+        let archive = dir.join(paquet::util::archive_file_name(name, version, "1", group));
         paquet::archive::create(&stage, &archive, false).unwrap();
         archive
     }

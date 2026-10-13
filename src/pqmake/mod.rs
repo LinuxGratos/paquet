@@ -27,7 +27,7 @@ use crate::{config, signals};
 
 /// Subpackages a recipe can split off with `PKGMK_GROUPS`: `<name>.<group>`.
 /// Translations always go to one subpackage per language, `<name>.<language>`.
-pub const KNOWN_GROUPS: [&str; 5] = util::PACKAGE_GROUPS;
+pub const KNOWN_GROUPS: [&str; 4] = util::PACKAGE_GROUPS;
 
 pub fn is_known_group(group: &str) -> bool {
     KNOWN_GROUPS.contains(&group)
@@ -126,7 +126,7 @@ impl Settings {
             cflags: "-O2 -pipe".into(),
             cxxflags: String::new(),
             chroot: None,
-            default_groups: "devel man doc service sources".into(),
+            default_groups: "devel doc service sources".into(),
             styles_dir: "/etc/pqmake/styles".into(),
             usr_src_dir: "/usr/src".into(),
             dry_run: false,
@@ -536,7 +536,11 @@ impl Pqmake {
     /// Archive of a recipe (or of one of its groups) in the repository.
     pub fn archive_path(&self, name: &str, pkgname: &str) -> PathBuf {
         let r = self.recipe(name);
-        self.s.repo_dir.join(&self.recipe_set[name]).join(util::archive_file_name(pkgname, &r.version, &r.release))
+        let group = pkgname.strip_prefix(name).and_then(|g| g.strip_prefix('.')).unwrap_or("");
+        self.s
+            .repo_dir
+            .join(&self.recipe_set[name])
+            .join(util::archive_file_name(pkgname, &r.version, &r.release, group))
     }
 
     /// Subpackages of a recipe's current version in the repository, as

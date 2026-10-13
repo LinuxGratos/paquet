@@ -69,10 +69,11 @@ pub fn is_valid_version(version: &str) -> bool {
 /// Subpackages a recipe can split off: `<name>.<group>`, whose archive is
 /// `<name>-<version>-<release>-<group>.tar.zst`. Translations also go to
 /// one subpackage per language, `<name>.<language>` (see [`is_language`]).
-pub const PACKAGE_GROUPS: [&str; 5] = ["devel", "doc", "man", "service", "sources"];
+pub const PACKAGE_GROUPS: [&str; 4] = ["devel", "doc", "service", "sources"];
 
-/// Language codes, as in the names of locale directories: two or three
-/// lowercase letters (`fr`, `pt`, `ast`).
+/// Language codes, as in the names of locale directories: two letters
+/// (`fr`, `pt`), or three for the languages without a two-letter code
+/// (`ast`).
 pub fn is_language(code: &str) -> bool {
     (2..=3).contains(&code.len()) && code.bytes().all(|b| b.is_ascii_lowercase())
 }
@@ -114,45 +115,49 @@ pub fn split_group(name: &str) -> Option<(&str, &str)> {
     name.rsplit_once('.').filter(|(base, group)| !base.is_empty() && is_package_group(group))
 }
 
-/// Archive file name of a package: `nano-8.0-1.tar.zst`, and for the
-/// subpackages `nano.devel` and `nano.fr`, `nano-8.0-1-devel.tar.zst` and
-/// `nano-8.0-1-fr.tar.zst`.
-pub fn archive_file_name(name: &str, version: &str, release: &str) -> String {
-    match split_group(name) {
-        Some((base, group)) => format!("{base}-{version}-{release}-{group}.tar.zst"),
-        None => format!("{name}-{version}-{release}.tar.zst"),
+/// Archive file name of a package, from its name and its group (the
+/// `Groups:` of its `.META`, empty for a main package): `nano-8.0-1.tar.zst`,
+/// and for the subpackages `nano.devel` and `nano.fr`,
+/// `nano-8.0-1-devel.tar.zst` and `nano-8.0-1-fr.tar.zst`. A main package
+/// named `foo.js` keeps `foo.js-1.0-1.tar.zst`.
+pub fn archive_file_name(name: &str, version: &str, release: &str, group: &str) -> String {
+    match name.strip_suffix(&format!(".{group}")) {
+        Some(base) if !group.is_empty() && !base.is_empty() => {
+            format!("{base}-{version}-{release}-{group}.tar.zst")
+        }
+        _ => format!("{name}-{version}-{release}.tar.zst"),
     }
 }
 
+fn split_three(base: &str) -> Option<(String, &str, &str)> {
+    let (rest, release) = base.rsplit_once('-')?;
+    let (name, version) = rest.rsplit_once('-')?;
+    (!name.is_empty()).then(|| (name.to_string(), version, release))
+}
+
 /// Splits an archive name (the `.tar.zst` already removed) into package
-/// name, version and release: `nano-8.0-1` gives (nano, 8.0, 1), and
-/// `nano-8.0-1-devel` gives (nano.devel, 8.0, 1). Returns None when a part
-/// is missing.
-pub fn split_archive_base(base: &str) -> Option<(String, &str, &str)> {
-    fn split(base: &str) -> Option<(String, &str, &str)> {
-        let (rest, release) = base.rsplit_once('-')?;
-        let (name, version) = rest.rsplit_once('-')?;
-        (!name.is_empty()).then(|| (name.to_string(), version, release))
-    }
-    if let Some((rest, group)) = base.rsplit_once('-') {
-        if is_package_group(group) {
-            if let Some((name, version, release)) = split(rest) {
+/// name, version and release, knowing the group of the package (from its
+/// `.META`): `nano-8.0-1` gives (nano, 8.0, 1), and `nano-8.0-1-devel` of
+/// group `devel` gives (nano.devel, 8.0, 1). Returns None when a part is
+/// missing.
+pub fn split_archive_name<'a>(base: &'a str, group: &str) -> Option<(String, &'a str, &'a str)> {
+    if !group.is_empty() {
+        if let Some(rest) = base.strip_suffix(&format!("-{group}")) {
+            if let Some((name, version, release)) = split_three(rest) {
                 return Some((format!("{name}.{group}"), version, release));
             }
         }
     }
-    split(base)
+    split_three(base)
 }
 
-/// True for the archive name of a subpackage in the former form
-/// (`nano.devel-8.0-1`), which no longer matches its index record.
-pub fn is_old_group_archive(base: &str) -> bool {
-    match split_archive_base(base) {
-        Some((name, version, release)) => {
-            name.rsplit_once('.').is_some_and(|(_, g)| PACKAGE_GROUPS.contains(&g))
-                && base == format!("{name}-{version}-{release}")
-        }
-        None => false,
+/// Like [`split_archive_name`], when the group is unknown: a last part that
+/// is a group or a language is taken as such (`nano-8.0-1-fr` gives
+/// nano.fr).
+pub fn split_archive_base(base: &str) -> Option<(String, &str, &str)> {
+    match base.rsplit_once('-') {
+        Some((_, group)) if is_package_group(group) => split_archive_name(base, group),
+        _ => split_three(base),
     }
 }
 
@@ -455,15 +460,19 @@ mod tests {
         assert_eq!(split("foo-1.0-devel"), parts("foo", "1.0", "devel"));
         assert_eq!(split("nano-8.0"), None);
         assert_eq!(split("-8.0-1"), None);
-        assert_eq!(archive_file_name("nano", "8.0", "1"), "nano-8.0-1.tar.zst");
-        assert_eq!(archive_file_name("nano.devel", "8.0", "1"), "nano-8.0-1-devel.tar.zst");
-        assert_eq!(archive_file_name("python3.11", "3.11.9", "1"), "python3.11-3.11.9-1.tar.zst");
         assert_eq!(split("nano-8.0-1-fr"), parts("nano.fr", "8.0", "1"));
-        assert_eq!(archive_file_name("nano.fr", "8.0", "1"), "nano-8.0-1-fr.tar.zst");
         assert_eq!(split("hunspell-fr-1.0-1"), parts("hunspell-fr", "1.0", "1"));
-        assert!(is_old_group_archive("nano.devel-8.0-1"));
-        assert!(!is_old_group_archive("nano-8.0-1-devel"));
-        assert!(!is_old_group_archive("nano-8.0-1"));
+        assert_eq!(archive_file_name("nano", "8.0", "1", ""), "nano-8.0-1.tar.zst");
+        assert_eq!(archive_file_name("nano.devel", "8.0", "1", "devel"), "nano-8.0-1-devel.tar.zst");
+        assert_eq!(archive_file_name("nano.fr", "8.0", "1", "fr"), "nano-8.0-1-fr.tar.zst");
+        assert_eq!(archive_file_name("python3.11", "3.11.9", "1", ""), "python3.11-3.11.9-1.tar.zst");
+        // A main package whose name looks like a subpackage
+        assert_eq!(archive_file_name("foo.js", "1.0", "1", ""), "foo.js-1.0-1.tar.zst");
+        let named = |b, g| split_archive_name(b, g).map(|(n, v, r)| (n, v.to_string(), r.to_string()));
+        assert_eq!(named("foo.js-1.0-1", ""), parts("foo.js", "1.0", "1"));
+        assert_eq!(named("foo-bar-1.0-rc", ""), parts("foo-bar", "1.0", "rc"));
+        assert_eq!(named("nano-8.0-1-fr", "fr"), parts("nano.fr", "8.0", "1"));
+        assert_eq!(named("nano.devel-8.0-1", "devel"), parts("nano.devel", "8.0", "1"));
     }
 
     #[test]

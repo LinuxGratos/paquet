@@ -374,7 +374,7 @@ fn configured_groups_come_with_their_packages() {
     env.package("base", "app", "1.0", &[("usr/bin/app", "app")], "lib");
     env.package("base", "app.fr", "1.0", &[("usr/share/locale/fr/app.mo", "fr")], "app");
     env.package("base", "app.de", "1.0", &[("usr/share/locale/de/app.mo", "de")], "app");
-    env.package("base", "app.man", "1.0", &[("usr/share/man/man1/app.1", "man")], "app");
+    env.package("base", "app.doc", "1.0", &[("usr/share/doc/app/README", "doc")], "app");
     env.index(None);
     let conf = |extra: &str| {
         let mirror = env.path("mirror").display().to_string();
@@ -388,11 +388,11 @@ fn configured_groups_come_with_their_packages() {
     assert_eq!((env.status("app"), env.status("lib"), env.status("app.fr")), ("I".into(), "A".into(), "N".into()));
 
     // GROUP lines: -u adds what installed packages lack
-    conf("GROUP=\"fr\"\nGROUP=\"man\"\n");
+    conf("GROUP=\"fr\"\nGROUP=\"doc\"\n");
     let r = env.pq(&["-u", "-y"]);
     assert!(r.ok(), "{}", r.all());
-    assert!(r.stdout.contains("Packages to add for GROUP fr man: app.fr app.man lib.fr\n"), "{}", r.stdout);
-    for p in ["app.fr", "app.man", "lib.fr"] {
+    assert!(r.stdout.contains("Packages to add for GROUP fr doc: app.fr app.doc lib.fr\n"), "{}", r.stdout);
+    for p in ["app.fr", "app.doc", "lib.fr"] {
         assert_eq!(env.status(p), "A", "{p}");
     }
     assert_eq!(env.status("app.de"), "N");
@@ -402,7 +402,7 @@ fn configured_groups_come_with_their_packages() {
     // They go with their package; lib.fr stays while lib does
     let r = env.pq(&["-r", "app"]);
     assert!(r.ok(), "{}", r.all());
-    for p in ["app", "app.fr", "app.man"] {
+    for p in ["app", "app.fr", "app.doc"] {
         assert_eq!(env.status(p), "N", "{p}");
     }
     assert!(r.stdout.contains("2 orphan package(s) left: lib lib.fr."), "{}", r.stdout);
@@ -413,11 +413,30 @@ fn configured_groups_come_with_their_packages() {
     // -i brings them at once, the dependencies' too
     let r = env.pq(&["-i", "app"]);
     assert!(r.ok(), "{}", r.all());
-    assert!(r.stdout.contains("Installing app and its dependencies: lib app lib.fr app.fr app.man\n"), "{}", r.stdout);
+    assert!(r.stdout.contains("Installing app and its dependencies: lib app lib.fr app.fr app.doc\n"), "{}", r.stdout);
 
     // A group no longer configured leaves orphans
     conf("GROUP=fr\nGROUP=Français\n");
     let r = env.pq(&["-o"]);
-    assert_eq!(r.stdout, "app.man\n", "{}", r.all());
+    assert_eq!(r.stdout, "app.doc\n", "{}", r.all());
     assert!(r.stderr.contains("GROUP: 'Français' is neither a language"), "{}", r.stderr);
+}
+
+#[test]
+fn main_package_named_like_a_subpackage() {
+    let env = Env::new();
+    // foo.js is a main package (empty Groups:), not the "js" language of foo
+    let archive = env.package("base", "foo", "1.0", &[("usr/bin/foo", "foo")], "");
+    let renamed = archive.with_file_name("foo.js-1.0-1.tar.zst");
+    fs::rename(&archive, &renamed).unwrap();
+    // A subpackage still named the former way is not indexed
+    let devel = env.package("base", "bar.devel", "1.0", &[("usr/include/bar.h", "h")], "");
+    fs::rename(&devel, devel.with_file_name("bar.devel-1.0-1.tar.zst")).unwrap();
+    let r = env.index(None);
+    assert!(r.stderr.contains("the archive of bar.devel must be named bar-1.0-1-devel.tar.zst"), "{}", r.all());
+    assert!(env.pq(&["-S", "--nosign"]).ok());
+    let r = env.pq(&["-i", "foo.js"]);
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!(env.status("foo.js"), "I");
+    assert!(env.rootpath("usr/bin/foo").is_file());
 }

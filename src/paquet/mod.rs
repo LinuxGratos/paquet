@@ -425,7 +425,7 @@ impl Paquet {
             .values()
             .filter(|r| r.is_installed() && !reached.contains(r.name.as_str()))
             .filter(|r| {
-                util::split_group(&r.name)
+                subpackage_of(r)
                     .is_some_and(|(base, group)| self.groups.iter().any(|g| g == group) && reached.contains(base))
             })
             .map(|r| r.name.as_str())
@@ -442,29 +442,23 @@ impl Paquet {
     /// Subpackages of the configured groups (`GROUP=`) that go with a
     /// package and are not installed yet: `nano.fr`, `nano.man`...
     fn missing_companions(&self, pkg: &str) -> Vec<String> {
-        if util::split_group(pkg).is_some() {
+        if self.state.get(pkg).or(self.repo.get(pkg)).and_then(subpackage_of).is_some() {
             return Vec::new();
         }
         self.groups
             .iter()
             .map(|g| format!("{pkg}.{g}"))
-            .filter(|c| self.repo.get(c).is_some() && !self.state.is_installed(c))
+            .filter(|c| self.repo.get(c).and_then(subpackage_of).is_some() && !self.state.is_installed(c))
             .collect()
     }
 
-    /// Installed subpackages that only make sense with their package, and
-    /// go away with it: the automatically installed `<pkg>.<language>` and
-    /// `<pkg>.<configured group>`.
+    /// Installed subpackages of a package (`nano.fr`, `nano.devel`...),
+    /// which go away with it.
     fn installed_companions(&self, pkg: &str) -> Vec<String> {
         self.state
             .map
             .values()
-            .filter(|r| r.is_installed() && r.status.contains('A'))
-            .filter(|r| {
-                util::split_group(&r.name).is_some_and(|(base, group)| {
-                    base == pkg && (util::is_language(group) || self.groups.iter().any(|g| g == group))
-                })
-            })
+            .filter(|r| r.is_installed() && subpackage_of(r).is_some_and(|(base, _)| base == pkg))
             .map(|r| r.name.clone())
             .collect()
     }
@@ -1596,6 +1590,13 @@ fn dir_usage(path: &Path) -> u64 {
 }
 
 /// Scripts of an archive, by name (`pre-install`...).
+/// Package and group of a subpackage (`nano.fr` of group `fr`): its name
+/// ends with the group of its `.META`. None for a main package, even one
+/// named `foo.js`.
+fn subpackage_of(record: &Record) -> Option<(&str, &str)> {
+    util::split_group(&record.name).filter(|(_, group)| record.groups.trim() == *group)
+}
+
 fn read_scripts(archive_path: &Path) -> Result<HashMap<String, Vec<u8>>> {
     let entries: Vec<&str> = archive::SCRIPTS.iter().map(|(_, e)| *e).collect();
     let found = archive::read_metadata(archive_path, &entries)?;

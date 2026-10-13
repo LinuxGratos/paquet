@@ -43,7 +43,6 @@ pub fn group_paths(group: &str, root: &Path) -> Vec<String> {
             paths
         }
         "doc" => existing(&["usr/share/doc", "usr/share/gtk-doc", "usr/share/info"]),
-        "man" => existing(&["usr/share/man"]),
         "service" => existing(&["etc/rc.d", "lib/systemd/system", "usr/lib/systemd/system"]),
         // Not split off the package: built from the recipe (see
         // Pqmake::write_sources)
@@ -286,8 +285,7 @@ impl Pqmake {
         let mut packages: Vec<String> = Vec::new();
         let mut dirs: Vec<PathBuf> = Vec::new();
         let mut depends: Vec<Vec<String>> = Vec::new();
-        // Translations first, so that translated manual pages go with their
-        // language rather than with the man group
+        // Translations: one package per language
         let languages = work.join("languages");
         let found =
             split_languages(pkg, &languages, &r.ignored_languages).context("unable to split the translations")?;

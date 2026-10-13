@@ -130,7 +130,6 @@ fn builds_in_dependency_order() {
         "base/libfake-1.0_rc1-2.tar.zst",
         "base/libfake-1.0_rc1-2-devel.tar.zst",
         "extra/hello-2.1-1.tar.zst",
-        "extra/hello-2.1-1-man.tar.zst",
         "extra/extradep-1-1.tar.zst",
     ] {
         assert!(repo.join(archive).is_file(), "{archive} missing:\n{}", r.all());
@@ -150,18 +149,14 @@ fn builds_in_dependency_order() {
         devel.contains("Description: Fake C library (devel)\nGroups: devel\nSet: base\nDepends: libfake\n"),
         "{devel}"
     );
-    let names: Vec<String> = paquet::archive::list(&repo.join("extra/hello-2.1-1-man.tar.zst"))
-        .unwrap()
-        .iter()
-        .map(|e| String::from_utf8_lossy(&e.name).into_owned())
-        .collect();
-    assert!(names.contains(&"usr/share/man/man1/hello.1".to_string()), "{names:?}");
+    // English manual pages stay in the main package
+    assert!(!repo.join("extra/hello-2.1-1-man.tar.zst").exists());
     let names: Vec<String> = paquet::archive::list(&repo.join("extra/hello-2.1-1.tar.zst"))
         .unwrap()
         .iter()
         .map(|e| String::from_utf8_lossy(&e.name).into_owned())
         .collect();
-    assert!(!names.iter().any(|n| n.contains("/man/")), "{names:?}");
+    assert!(names.contains(&"usr/share/man/man1/hello.1".to_string()), "{names:?}");
     assert!(names.contains(&"usr/share/hello/inside.txt".to_string()), "{names:?}");
 
     // Up to date, unless forced
@@ -293,16 +288,16 @@ fn footprints_show_what_changed() {
     };
     tool(
         "1",
-        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool" "$PKG/usr/share/man/man1"
+        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool" "$PKG/usr/share/locale/fr"
     printf '#!/bin/sh\n' > "$PKG/usr/bin/tool"; chmod 755 "$PKG/usr/bin/tool"
     echo a > "$PKG/usr/share/tool/a"
     ln -s a "$PKG/usr/share/tool/link"
-    echo man > "$PKG/usr/share/man/man1/tool.1""#,
+    echo fr > "$PKG/usr/share/locale/fr/tool.mo""#,
     );
     let r = pqmake(&env, &["-q", "tool"]);
     assert!(r.ok(), "{}", r.all());
     assert!(r.stdout.contains("  new footprint: base/tool/.footprint\n"), "{}", r.stdout);
-    assert!(r.stdout.contains("  new footprint: base/tool/.footprint.man\n"), "{}", r.stdout);
+    assert!(r.stdout.contains("  new footprint: base/tool/.footprint.fr\n"), "{}", r.stdout);
     let footprint = fs::read_to_string(env.path("recipes/base/tool/.footprint")).unwrap();
     assert_eq!(
         footprint,
@@ -335,7 +330,7 @@ fn footprints_show_what_changed() {
                     \x20   MISSING  -rw-r--r-- root/root usr/share/tool/a\n\
                     \x20   NEW      -rw-r--r-- root/root usr/share/tool/b\n\
                     \x20   CHANGED  lrwxrwxrwx root/root usr/share/tool/link -> b  (was -> a)\n\
-                    ==> tool.man is no longer produced (base/tool/.footprint.man)\n\
+                    ==> tool.fr is no longer produced (base/tool/.footprint.fr)\n\
                     \x20   If these changes are expected: pqmake --update-footprint tool\n";
     assert!(r.stdout.contains(expected), "{}", r.stdout);
     assert!(r.stdout.contains("==> Footprint changed: tool (see above)"), "{}", r.stdout);
@@ -344,13 +339,13 @@ fn footprints_show_what_changed() {
     // The packager accepts the changes
     let r = pqmake(&env, &["--update-footprint", "tool"]);
     assert!(r.ok(), "{}", r.all());
-    assert_eq!(r.stdout, "  base/tool/.footprint updated\n  base/tool/.footprint.man removed\n");
+    assert_eq!(r.stdout, "  base/tool/.footprint updated\n  base/tool/.footprint.fr removed\n");
     assert!(
         fs::read_to_string(env.path("recipes/base/tool/.footprint"))
             .unwrap()
             .contains("-rwsr-xr-x\troot/root\tusr/bin/tool\n")
     );
-    assert!(!env.path("recipes/base/tool/.footprint.man").exists());
+    assert!(!env.path("recipes/base/tool/.footprint.fr").exists());
     assert_eq!(pqmake(&env, &["-u", "tool"]).stdout, "  footprints of tool are up to date\n");
     let r = pqmake(&env, &["-q", "-f", "tool"]);
     assert!(r.ok() && !r.stdout.contains("ootprint"), "{}", r.all());
@@ -554,11 +549,6 @@ fn sources_packages() {
     assert!(r.stderr.contains("PKGMK_IGNORE_GROUPS: unknown group 'nope'"), "{}", r.stderr);
     assert!(repo.join("base/srcdemo-1.0-4.tar.zst").is_file());
     assert!(!repo.join("base/srcdemo-1.0-4-sources.tar.zst").exists());
-
-    // An archive with the former name of a subpackage is not indexed
-    fs::copy(repo.join("base/srcdemo-1.0-1-sources.tar.zst"), repo.join("base/old.devel-1.0-1.tar.zst")).unwrap();
-    let r = env.index(None);
-    assert!(r.stderr.contains("former name of a subpackage archive; rename it old-1.0-1-devel.tar.zst"), "{}", r.all());
 }
 
 #[test]
@@ -614,6 +604,7 @@ build() {{
             "usr/share/locale/en@quot/LC_MESSAGES/polyglot.mo",
             "usr/share/locale/en_GB/LC_MESSAGES/polyglot.mo",
             "usr/share/locale/locale.alias",
+            "usr/share/man/man1/polyglot.1",
         ]
     );
     // One package per base language, translated manual pages included
@@ -630,7 +621,7 @@ build() {{
         ["usr/share/help/de/index.page", "usr/share/locale/de/LC_MESSAGES/polyglot.mo"]
     );
     assert_eq!(files("polyglot-1-1-pt.tar.zst"), ["usr/share/locale/pt_BR/LC_MESSAGES/polyglot.mo"]);
-    assert_eq!(files("polyglot-1-1-man.tar.zst"), ["usr/share/man/man1/polyglot.1"]);
+    assert!(!repo.join("polyglot-1-1-man.tar.zst").exists());
     let meta = paquet::archive::read_meta(&repo.join("polyglot-1-1-fr.tar.zst")).unwrap().unwrap();
     assert_eq!(meta, "Description: Speaks (fr)\nGroups: fr\nSet: base\nDepends: polyglot\n");
     assert!(env.path("recipes/base/polyglot/.footprint.fr").is_file());

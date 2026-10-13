@@ -209,9 +209,10 @@ GROUP="fr"
 GROUP="it"
 ```
 
-`GROUP` accepte aussi les autres groupes de sous-paquets : `GROUP="man"`
-installe les pages de manuel (`nano.man`) avec chaque paquet, `GROUP="doc"`
-la documentation...
+Les pages de manuel anglaises sont dans le paquet principal, les traduites
+dans le paquet de leur langue. `GROUP` accepte aussi les autres groupes de
+sous-paquets : `GROUP="doc"` installe la documentation (`nano.doc`) avec
+chaque paquet, `GROUP="devel"` les fichiers de développement...
 
 Avec `GROUP="fr"` :
 

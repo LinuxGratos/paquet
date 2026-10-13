@@ -235,9 +235,9 @@ sont décrits dans [Scripts et hooks](scripts.md).
 Une recette peut produire, en plus du paquet principal, des sous-paquets
 `<nom>.<groupe>`, chacun avec sa propre archive,
 `<nom>-<version>-<release>-<groupe>.tar.zst`. Par défaut, `pqmake` produit
-les groupes `devel man doc service sources` (réglage `PKGMK_GROUPS`). Une
+les groupes `devel doc service sources` (réglage `PKGMK_GROUPS`). Une
 recette :
-- choisit les siens avec `PKGMK_GROUPS=(devel man)`, ou n'en produit aucun
+- choisit les siens avec `PKGMK_GROUPS=(devel doc)`, ou n'en produit aucun
   avec `PKGMK_GROUPS=()` ;
 - en retire seulement certains avec `PKGMK_IGNORE_GROUPS=(sources)` : les
   autres groupes par défaut restent. Les fichiers d'un groupe retiré restent
@@ -250,7 +250,6 @@ Les traductions sont toujours séparées par langue, en plus de ces groupes
 |---|---|---|
 | `devel` | `usr/include`, `usr/lib/pkgconfig`, `usr/share/pkgconfig`, `usr/lib/cmake`, `usr/share/aclocal`, et dans `usr/lib` : `*.a`, `*.la` et les liens `*.so` | `<nom>` et `run_devel` |
 | `doc` | `usr/share/doc`, `usr/share/gtk-doc`, `usr/share/info` | |
-| `man` | `usr/share/man` | |
 | `service` | `etc/rc.d`, `lib/systemd/system`, `usr/lib/systemd/system` | `<nom>` |
 | `sources` | rien n'est déplacé : voir ci-dessous | |
 
@@ -268,9 +267,10 @@ de base : `nano.fr` contient `fr`, `fr_CA`, `fr_BE`..., `nano.pt` contient
 
 L'anglais (`en`, `en_GB`, `en@quot`...) reste dans le paquet principal, avec
 tout ce qui n'est pas une langue (`usr/share/help/C`, `locale.alias`) : sans
-autre réglage, un système n'installe que l'anglais. Les traductions passent
-avant le groupe `man` : `usr/share/man/fr/` va dans `nano.fr`, pas dans
-`nano.man`.
+autre réglage, un système n'installe que l'anglais. Les pages de manuel
+anglaises (`usr/share/man/man1/`...) restent donc dans le paquet principal,
+les traduites (`usr/share/man/fr/`) vont avec leur langue : il n'y a pas de
+groupe `man`.
 
 Chaque paquet de langue dépend du paquet principal, s'appelle
 `<nom>-<version>-<release>-<langue>.tar.zst` et a son footprint
@@ -295,7 +295,7 @@ Le sous-paquet `<nom>.sources` garde de quoi reconstruire le paquet, dans
 ```text
 ==> Packaging nano 9.3-1
   /srv/great-os/stable/x86_64/base/nano-9.3-1-doc.tar.zst
-  /srv/great-os/stable/x86_64/base/nano-9.3-1-man.tar.zst
+  /srv/great-os/stable/x86_64/base/nano-9.3-1-fr.tar.zst
   /srv/great-os/stable/x86_64/base/nano-9.3-1-sources.tar.zst
   /srv/great-os/stable/x86_64/base/nano-9.3-1.tar.zst
 ```
@@ -344,7 +344,7 @@ CFLAGS="-O2 -pipe"
 | `LOG_DIR` | journaux de construction | `~/pqmake/logs` |
 | `MAKEFLAGS` | options de `make` | `-j<nombre de processeurs>` |
 | `CFLAGS`, `CXXFLAGS` | options de compilation | `-O2 -pipe` (`CXXFLAGS` = `CFLAGS`) |
-| `PKGMK_GROUPS` | groupes séparés par défaut | `devel man doc service sources` |
+| `PKGMK_GROUPS` | groupes séparés par défaut | `devel doc service sources` |
 | `STYLES_DIR` | styles de construction partagés | `/etc/pqmake/styles` |
 | `USR_SRC_DIR` | sources installées par les paquets `<nom>.sources` | `/usr/src` |
 | `CHROOT` | système de construction (voir plus bas) | aucun : construction sur l'hôte |
