@@ -24,7 +24,7 @@ paquet -I nano         # affiche ce que l'on sait d'un paquet
 ## Documentation
 
 - [Utilisation de paquet](docs/utilisation.md) : configurer le dépôt, installer, mettre à jour, supprimer, réparer.
-- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, styles de construction, construire, construire en chroot.
+- [Construire des paquets avec pqmake](docs/pqmake.md) : écrire une recette, styles de construction, footprint, construire, construire en chroot.
 - [Scripts et hooks](docs/scripts.md) : scripts d'installation et de suppression, hooks du système (`ldconfig`...).
 - [Générer et publier un dépôt](docs/depot.md) : organisation du miroir, index `PQREPO`, publication.
 - [Signer un dépôt](docs/signature.md) : clés, signature, installation des clés, rotation.
@@ -164,6 +164,7 @@ pqmake -n nano                 # affiche le plan de construction
 pqmake nano                    # construit nano et ce dont il a besoin
 pqmake -a -k --index           # construit tout, continue après un échec, met à jour PQREPO
 pqmake --chroot /srv/rootfs nano
+pqmake --update-footprint nano # accepte les changements de footprint signalés
 ```
 
 Les recettes sont rangées en `<recettes>/<ensemble>/<nom>/Pkgfile`, à la
@@ -175,7 +176,11 @@ sa version et sa release n'est pas reconstruite (sauf `-f`).
 
 - Une recette sans fonction `build()` utilise un style de construction
   partagé (`build=meson`), cherché dans `<recettes>/styles/` puis
-  `/etc/pqmake/styles/`.
+  `/etc/pqmake/styles/`. Les styles courants (autotools, meson, cmake,
+  kde6, python3, pip3...) sont fournis dans [`styles/`](styles/).
+- Après chaque construction, le contenu des archives est comparé au
+  `.footprint` de la recette (fichiers, droits, propriétaires, à la CRUX) ;
+  les différences, setuid compris, sont signalées au packageur.
 - Les fichiers `pre-install`, `post-install`, `pre-remove` et `post-remove`
   de la recette deviennent les scripts du paquet, lancés par `paquet`.
 - Les groupes (`PKGMK_GROUPS` : `devel`, `doc`, `man`, `service`, `sources`,

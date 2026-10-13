@@ -12,6 +12,7 @@
 //! built. Without it, recipes are built on the host, as a regular user.
 
 mod build;
+pub mod footprint;
 mod package;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -100,6 +101,8 @@ pub struct Settings {
     pub update_index: bool,
     pub build_all: bool,
     pub force_targets: bool,
+    /// Rewrite the footprints of the targets from their archives.
+    pub update_footprint: bool,
     pub targets: Vec<String>,
 }
 
@@ -127,6 +130,7 @@ impl Settings {
             update_index: false,
             build_all: false,
             force_targets: false,
+            update_footprint: false,
             targets: Vec::new(),
         }
     }
@@ -195,6 +199,8 @@ pub struct Pqmake {
     mounts: Vec<PathBuf>,
     /// The repository index must be regenerated before installing from it
     index_dirty: bool,
+    /// Recipes whose new archives differ from their footprints
+    footprint_changed: Vec<String>,
     _lock: Option<fs::File>,
 }
 
@@ -223,6 +229,7 @@ impl Pqmake {
             force: HashSet::new(),
             mounts: Vec::new(),
             index_dirty: true,
+            footprint_changed: Vec::new(),
             _lock: None,
         }
     }
@@ -604,6 +611,9 @@ impl Pqmake {
             }
         }
         println!("==> {built} recipe(s) built");
+        if !self.footprint_changed.is_empty() {
+            println!("==> Footprint changed: {} (see above)", self.footprint_changed.join(" "));
+        }
         if !broken.is_empty() {
             bail!("failed: {}; not built: {}", failed.join(" "), broken.iter().cloned().collect::<Vec<_>>().join(" "));
         }
@@ -629,6 +639,9 @@ pub fn display_help(prog: &str, config_file: &Path) {
     println!("  -a, --all             Build every recipe");
     println!("  -n, --dry-run         Only show the build plan");
     println!("  -f, --force           Rebuild the named recipes even if their archive exists");
+    println!("  -u, --update-footprint");
+    println!("                        Rewrite the footprints of the named recipes from their");
+    println!("                        archives (accepts the changes shown by the last build)");
     println!("  -k, --keep-going      After a failure, go on with the recipes that do not need it");
     println!("  -q, --quiet           Only write the build output to the log files");
     println!("  -c, --chroot <rootfs> Build in an overlay of <rootfs>, with the makedepends");
@@ -673,6 +686,7 @@ fn run(prog: &str, args: Vec<String>) -> Result<()> {
             "-a" | "--all" => s.build_all = true,
             "-n" | "--dry-run" => s.dry_run = true,
             "-f" | "--force" => s.force_targets = true,
+            "-u" | "--update-footprint" => s.update_footprint = true,
             "-k" | "--keep-going" => s.keep_going = true,
             "-q" | "--quiet" => s.quiet = true,
             "--index" => s.update_index = true,
@@ -718,6 +732,14 @@ fn run(prog: &str, args: Vec<String>) -> Result<()> {
         if pm.s.force_targets {
             pm.force.insert(name);
         }
+    }
+
+    if pm.s.update_footprint {
+        for name in pm.s.targets.clone() {
+            pm.read_recipe(&name)?;
+            pm.update_footprints(&name)?;
+        }
+        return Ok(());
     }
 
     let targets = pm.s.targets.clone();

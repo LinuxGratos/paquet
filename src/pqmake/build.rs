@@ -436,6 +436,8 @@ impl Pqmake {
             if let Err(err) = self.package_recipe(name, &work, &pkg, root_opt) {
                 eprintln!("Error: {err:#}");
                 ok = false;
+            } else {
+                self.check_footprints(name);
             }
         }
         if chrooted && self.unmount_all().is_err() {

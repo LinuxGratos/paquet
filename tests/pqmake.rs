@@ -7,6 +7,7 @@ use std::fs;
 use std::path::Path;
 
 use common::{Env, Run};
+use paquet::pqmake;
 
 fn recipe(env: &Env, set: &str, name: &str, body: &str) {
     let dir = env.path(&format!("recipes/{set}/{name}"));
@@ -282,4 +283,156 @@ fn scripts_and_build_styles() {
     let r = pqmake(&env, &["-n", "lost"]);
     assert!(!r.ok());
     assert!(r.all().contains("build style 'nosuchstyle' not found"), "{}", r.all());
+}
+
+#[test]
+fn footprints_show_what_changed() {
+    let env = Env::new();
+    let tool = |release: &str, body: &str| {
+        recipe(&env, "base", "tool", &format!("name=tool\nversion=1\nrelease={release}\nbuild() {{\n{body}\n}}\n"));
+    };
+    tool(
+        "1",
+        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool" "$PKG/usr/share/man/man1"
+    printf '#!/bin/sh\n' > "$PKG/usr/bin/tool"; chmod 755 "$PKG/usr/bin/tool"
+    echo a > "$PKG/usr/share/tool/a"
+    ln -s a "$PKG/usr/share/tool/link"
+    echo man > "$PKG/usr/share/man/man1/tool.1""#,
+    );
+    let r = pqmake(&env, &["-q", "tool"]);
+    assert!(r.ok(), "{}", r.all());
+    assert!(r.stdout.contains("  new footprint: base/tool/.footprint\n"), "{}", r.stdout);
+    assert!(r.stdout.contains("  new footprint: base/tool/.footprint.man\n"), "{}", r.stdout);
+    let footprint = fs::read_to_string(env.path("recipes/base/tool/.footprint")).unwrap();
+    assert_eq!(
+        footprint,
+        "drwxr-xr-x\troot/root\tusr/\n\
+         drwxr-xr-x\troot/root\tusr/bin/\n\
+         -rwxr-xr-x\troot/root\tusr/bin/tool\n\
+         drwxr-xr-x\troot/root\tusr/share/\n\
+         drwxr-xr-x\troot/root\tusr/share/tool/\n\
+         -rw-r--r--\troot/root\tusr/share/tool/a\n\
+         lrwxrwxrwx\troot/root\tusr/share/tool/link -> a\n"
+    );
+
+    // Same result: nothing to report
+    let r = pqmake(&env, &["-q", "-f", "tool"]);
+    assert!(r.ok() && !r.stdout.contains("ootprint"), "{}", r.all());
+
+    // The program becomes setuid, a file is renamed, a link changes and the
+    // man page is gone
+    tool(
+        "2",
+        r#"mkdir -p "$PKG/usr/bin" "$PKG/usr/share/tool"
+    printf '#!/bin/sh\n' > "$PKG/usr/bin/tool"; chmod 4755 "$PKG/usr/bin/tool"
+    echo b > "$PKG/usr/share/tool/b"
+    ln -s b "$PKG/usr/share/tool/link""#,
+    );
+    let r = pqmake(&env, &["-q", "tool"]);
+    assert!(r.ok(), "the build still succeeds: {}", r.all());
+    let expected = "==> Footprint of tool changed (base/tool/.footprint):\n\
+                    \x20   CHANGED  -rwsr-xr-x root/root usr/bin/tool  (was -rwxr-xr-x: setuid added)\n\
+                    \x20   MISSING  -rw-r--r-- root/root usr/share/tool/a\n\
+                    \x20   NEW      -rw-r--r-- root/root usr/share/tool/b\n\
+                    \x20   CHANGED  lrwxrwxrwx root/root usr/share/tool/link -> b  (was -> a)\n\
+                    ==> tool.man is no longer produced (base/tool/.footprint.man)\n\
+                    \x20   If these changes are expected: pqmake --update-footprint tool\n";
+    assert!(r.stdout.contains(expected), "{}", r.stdout);
+    assert!(r.stdout.contains("==> Footprint changed: tool (see above)"), "{}", r.stdout);
+    assert_eq!(fs::read_to_string(env.path("recipes/base/tool/.footprint")).unwrap(), footprint, "kept as is");
+
+    // The packager accepts the changes
+    let r = pqmake(&env, &["--update-footprint", "tool"]);
+    assert!(r.ok(), "{}", r.all());
+    assert_eq!(r.stdout, "  base/tool/.footprint updated\n  base/tool/.footprint.man removed\n");
+    assert!(
+        fs::read_to_string(env.path("recipes/base/tool/.footprint"))
+            .unwrap()
+            .contains("-rwsr-xr-x\troot/root\tusr/bin/tool\n")
+    );
+    assert!(!env.path("recipes/base/tool/.footprint.man").exists());
+    assert_eq!(pqmake(&env, &["-u", "tool"]).stdout, "  footprints of tool are up to date\n");
+    let r = pqmake(&env, &["-q", "-f", "tool"]);
+    assert!(r.ok() && !r.stdout.contains("ootprint"), "{}", r.all());
+
+    // Only a built recipe has archives to take the footprint from
+    tool("3", ":");
+    let r = pqmake(&env, &["-u", "tool"]);
+    assert!(!r.ok() && r.stderr.contains("tool 1-3 is not built"), "{}", r.all());
+}
+
+#[test]
+fn provided_build_styles() {
+    let styles = Path::new(env!("CARGO_MANIFEST_DIR")).join("styles");
+    let mut names: Vec<String> =
+        fs::read_dir(&styles).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["autogen", "autoreconf", "autotools", "cmake", "kde5", "kde6", "meson", "pip3", "plasma", "python3", "xorg"]
+    );
+    for name in &names {
+        let ok = std::process::Command::new("bash").arg("-n").arg(styles.join(name)).status().unwrap().success();
+        assert!(ok, "{name} is not valid bash");
+    }
+
+    // Every style is found in STYLES_DIR
+    let env = Env::new();
+    fs::write(
+        env.path("pqmake.conf"),
+        format!(
+            "RECIPES_DIR={}\nREPO_DIR={}\nWORK_DIR={}\nSOURCES_DIR={}\nLOG_DIR={}\nSTYLES_DIR={}\nMAKEFLAGS=-j1\n",
+            env.path("recipes").display(),
+            env.repo_dir().display(),
+            env.path("work").display(),
+            env.path("sources").display(),
+            env.path("logs").display(),
+            styles.display()
+        ),
+    )
+    .unwrap();
+    for name in &names {
+        let recipe_name = format!("with{name}");
+        recipe(&env, "base", &recipe_name, &format!("name={recipe_name}\nversion=1\nbuild={name}\n"));
+    }
+    let all: Vec<String> = names.iter().map(|n| format!("with{n}")).collect();
+    let args: Vec<&str> = std::iter::once("-n").chain(all.iter().map(String::as_str)).collect();
+    let r = pqmake(&env, &args);
+    assert!(r.ok(), "{}", r.all());
+
+    // A real build with the autotools style
+    if !pqmake::command_exists("make") {
+        return;
+    }
+    let src = env.path("autosrc/fake-2.0");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("configure"),
+        "#!/bin/sh\necho \"configured with $*\" > args\n\
+         printf 'all:\\n\\ttrue\\ninstall:\\n\\tmkdir -p $(DESTDIR)/usr/share/fake\\n\\tcp args $(DESTDIR)/usr/share/fake/\\n' > Makefile\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(src.join("configure"), fs::Permissions::from_mode(0o755)).unwrap();
+    recipe(&env, "base", "fake", "name=fake\nversion=2.0\nsource=(fake-2.0.tar.gz)\nbuild=autotools\n");
+    let ok = std::process::Command::new("tar")
+        .arg("-czf")
+        .arg(env.path("recipes/base/fake/fake-2.0.tar.gz"))
+        .arg("-C")
+        .arg(env.path("autosrc"))
+        .arg("fake-2.0")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+    let r = pqmake(&env, &["-q", "fake"]);
+    assert!(r.ok(), "{}", r.all());
+    let archive = env.repo_dir().join("base/fake-2.0-1.tar.zst");
+    let root = env.path("extracted");
+    fs::create_dir_all(&root).unwrap();
+    paquet::archive::extract(&archive, &root).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("usr/share/fake/args")).unwrap(),
+        "configured with --prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-static\n"
+    );
 }

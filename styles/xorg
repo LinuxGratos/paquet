@@ -1,0 +1,12 @@
+# Style xorg: build=xorg (X.Org modules)
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+# The sources unpack to ${_name}-$version when the recipe sets _name, else to
+# $name-$version.
+
+cd "${_name:-$name}-$version"
+./configure --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --disable-static
+make
+make DESTDIR="$PKG" install

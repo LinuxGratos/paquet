@@ -76,6 +76,76 @@ pub fn list(path: &Path) -> Result<Vec<ListEntry>> {
     Ok(entries)
 }
 
+/// Type and attributes of an archive entry, as stored in its header.
+pub struct EntryInfo {
+    /// Normalized name (see [`normalize_entry`]).
+    pub name: Vec<u8>,
+    /// `-` (file or hard link), `d`, `l`, `c`, `b` or `p`, like `ls -l`.
+    pub kind: char,
+    /// Permission bits, setuid, setgid and sticky bits included.
+    pub mode: u32,
+    pub uid: u64,
+    pub gid: u64,
+    /// Target of a symlink.
+    pub link: Vec<u8>,
+    /// Major and minor numbers of a device.
+    pub device: Option<(u32, u32)>,
+}
+
+/// Type, permissions, owner and link target of the files of an archive,
+/// metadata entries excluded, in archive order.
+pub fn entry_infos(path: &Path) -> Result<Vec<EntryInfo>> {
+    let mut archive = open(path)?;
+    let mut infos = Vec::new();
+    let read = (|| -> io::Result<()> {
+        for entry in archive.entries()? {
+            let entry = entry?;
+            let raw = entry.path_bytes();
+            let name = normalize_entry(&raw).to_vec();
+            let header = entry.header();
+            let t = header.entry_type();
+            if name.is_empty() || name == b"." || is_metadata(&name) {
+                continue;
+            }
+            let kind = if t.is_dir() || raw.ends_with(b"/") {
+                'd'
+            } else if t.is_symlink() {
+                'l'
+            } else if t.is_character_special() {
+                'c'
+            } else if t.is_block_special() {
+                'b'
+            } else if t.is_fifo() {
+                'p'
+            } else if t.is_file() || t.is_hard_link() || t == tar::EntryType::Continuous {
+                '-'
+            } else {
+                continue;
+            };
+            let device = match kind {
+                'c' | 'b' => Some((header.device_major()?.unwrap_or(0), header.device_minor()?.unwrap_or(0))),
+                _ => None,
+            };
+            infos.push(EntryInfo {
+                name,
+                kind,
+                mode: header.mode()? & 0o7777,
+                uid: header.uid()?,
+                gid: header.gid()?,
+                link: if kind == 'l' {
+                    entry.link_name_bytes().map(|l| l.into_owned()).unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
+                device,
+            });
+        }
+        Ok(())
+    })();
+    read.with_context(|| format!("unable to read archive {}", path.display()))?;
+    Ok(infos)
+}
+
 /// Content of the `.META` file of an archive, if any.
 pub fn read_meta(path: &Path) -> Result<Option<String>> {
     let mut found = read_metadata(path, &[".META"])?;

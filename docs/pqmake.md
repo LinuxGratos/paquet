@@ -15,6 +15,7 @@ recettes/
 │   ├── libsalut/
 │   │   └── Pkgfile
 │   └── nano/
+│       ├── .footprint       <- fichiers attendus dans le paquet
 │       ├── Pkgfile
 │       └── nano.conf        <- fichier fourni avec la recette
 ├── extra/                   <- ensemble « extra »
@@ -128,10 +129,13 @@ Un style est un fichier de commandes bash, qui sert de corps à la fonction
 `$SRC`, `$PKG`...) et le même `set -e`. Par exemple `styles/meson` :
 
 ```bash
-cd $name-$version
-meson setup build --prefix=/usr --buildtype=release
-meson compile -C build
-DESTDIR=$PKG meson install -C build
+meson setup --prefix=/usr \
+            --libdir=/usr/lib \
+            "$name-$version" \
+            build
+
+ninja -C build
+DESTDIR="$PKG" ninja -C build install
 ```
 
 Le style `<nom>` est cherché, dans cet ordre :
@@ -153,6 +157,39 @@ make DESTDIR=$PKG install
 
 Un style introuvable est signalé dès le plan de construction (`pqmake -n`).
 Une fonction `build()` dans le `Pkgfile` passe toujours avant `build=`.
+
+#### Les styles fournis
+
+Le dépôt de `paquet` fournit des styles prêts à l'emploi, dans
+[`styles/`](../styles/). Le paquet de `paquet` les installe dans
+`/etc/pqmake/styles/` :
+
+```bash
+mkdir -p $PKG/etc/pqmake/styles
+cp -P $PKGMK_ROOT/styles/* $PKG/etc/pqmake/styles/    # -P garde les liens kde5 et plasma
+```
+
+| `build=` | Construction |
+|---|---|
+| `autotools` | `./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --disable-static`, `make`, `make install` |
+| `autoreconf` | comme `autotools`, après `autoreconf -fiv` |
+| `autogen` | `./autogen.sh`, puis `./configure --prefix=/usr --disable-static`, `make`, `make install` |
+| `xorg` | comme `autotools`, depuis `${_name}-$version` |
+| `meson` | `meson setup --prefix=/usr --libdir=/usr/lib`, `ninja` |
+| `cmake`, `kde5` | `cmake` en `Release`, `lib` comme répertoire des bibliothèques, sans les tests |
+| `kde6`, `plasma` | comme `cmake`, avec `-DQT_MAJOR_VERSION=6` |
+| `python3` | `python3 setup.py build` puis `install --root=$PKG`, depuis `${_name}-$version` |
+| `pip3` | une roue (*wheel*) construite avec `pip3`, depuis `${_name}-$version` |
+
+Les styles `python3`, `pip3` et `xorg` entrent dans `${_name}-$version` quand
+la recette définit `_name` (le nom du projet amont, s'il diffère du nom du
+paquet), sinon dans `$name-$version`. `pip3` met d'abord à jour `pip`,
+`wheel` et `setuptools` dans le système de construction : il a besoin du
+réseau pendant la construction.
+
+Comme tout fichier de `/etc`, un style modifié par l'administrateur n'est pas
+écrasé par une mise à jour de `paquet`. Un style du même nom dans
+`<recettes>/styles/` passe avant celui de `/etc/pqmake/styles/`.
 
 ### Les scripts
 
@@ -285,6 +322,7 @@ $ pqmake salut
 | `-a`, `--all` | construit toutes les recettes |
 | `-n`, `--dry-run` | affiche seulement le plan |
 | `-f`, `--force` | reconstruit les recettes nommées même si leur archive existe |
+| `-u`, `--update-footprint` | réécrit le footprint des recettes nommées à partir de leurs archives, sans construire (voir plus bas) |
 | `-k`, `--keep-going` | après un échec, continue avec les recettes qui n'en dépendent pas |
 | `-q`, `--quiet` | n'écrit la sortie des constructions que dans les journaux (les 20 dernières lignes sont affichées en cas d'échec) |
 | `--index` | régénère l'index du dépôt à la fin (signé si `PQ_SIGN_KEY` est définie) |
@@ -298,6 +336,69 @@ travail (`WORK_DIR/<nom>`) est gardé pour l'enquête :
 ```text
 Error: build of salut failed (log: ~/pqmake/journaux/salut-0.3-2.log, work: ~/pqmake/travail/salut)
 ```
+
+### Le footprint
+
+Le footprint d'un paquet est la liste de ses fichiers, avec leur type, leurs
+droits et leur propriétaire, comme dans CRUX. Il est gardé dans le
+répertoire de la recette et versionné avec elle : `.footprint` pour le
+paquet principal, `.footprint.<groupe>` pour chaque sous-paquet.
+
+```text
+drwxr-xr-x	root/root	usr/
+drwxr-xr-x	root/root	usr/bin/
+-rwxr-xr-x	root/root	usr/bin/nano
+lrwxrwxrwx	root/root	usr/bin/rnano -> nano
+```
+
+Après chaque construction, `pqmake` compare les nouvelles archives au
+footprint et montre les différences. Elles ne font pas échouer la
+construction : c'est au packageur de décider s'il faut corriger la recette et
+reconstruire, ou accepter les changements.
+
+```text
+==> Packaging nano 8.3-1
+  /srv/great-os/stable/x86_64/base/nano-8.3-1.tar.zst
+==> Footprint of nano changed (base/nano/.footprint):
+    CHANGED  -rwsr-xr-x root/root usr/bin/nano  (was -rwxr-xr-x: setuid added)
+    MISSING  lrwxrwxrwx root/root usr/bin/rnano -> nano
+    NEW      -rw-r--r-- root/root usr/share/nano/extra/zig.nanorc
+==> nano.doc is no longer produced (base/nano/.footprint.doc)
+    If these changes are expected: pqmake --update-footprint nano
+...
+==> 1 recipe(s) built
+==> Footprint changed: nano (see above)
+```
+
+| Ligne | Sens |
+|---|---|
+| `NEW` | fichier nouveau dans le paquet |
+| `MISSING` | fichier attendu qui n'y est plus |
+| `CHANGED` | même chemin, mais type, droits, propriétaire ou cible de lien différents ; `(was ...)` donne l'ancienne valeur |
+
+Les bits setuid, setgid et sticky sont signalés en clair (`setuid added`,
+`setuid removed`, ou `(setuid)` sur un nouveau fichier) : un setuid perdu
+casse un programme comme `su`, un setuid inattendu est un risque.
+
+Ce que le footprint permet de repérer :
+- une dépendance optionnelle détectée (ou perdue) par `configure` sur la
+  machine de construction, qui ajoute ou retire des fichiers ;
+- une nouvelle version qui ne fournit plus un programme, ou installe ailleurs
+  (`lib64` au lieu de `lib`) ;
+- un changement de droits ou de propriétaire ;
+- en relecture, dans git, ce qu'une mise à jour change dans le paquet.
+
+Pour accepter les changements, sans reconstruire :
+
+```console
+$ pqmake --update-footprint nano
+  base/nano/.footprint updated
+  base/nano/.footprint.doc removed
+```
+
+Un footprint absent est créé à la première construction (`new footprint:
+base/nano/.footprint`). En construction chroot, il appartient au
+propriétaire du `Pkgfile`, pas à root.
 
 Sur l'hôte, `pqmake` refuse de tourner en root : une erreur dans `build()`
 (un `$PKG` oublié) installerait directement dans le système. Les fichiers

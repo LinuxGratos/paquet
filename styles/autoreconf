@@ -1,0 +1,11 @@
+# Style autoreconf: build=autoreconf (configure script to regenerate)
+# Sourced as the build() function of the recipe, from $SRC, with set -e.
+
+cd "$name-$version"
+autoreconf -fiv
+./configure --prefix=/usr \
+            --sysconfdir=/etc \
+            --localstatedir=/var \
+            --disable-static
+make
+make DESTDIR="$PKG" install

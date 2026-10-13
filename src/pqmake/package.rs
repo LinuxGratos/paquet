@@ -300,6 +300,16 @@ impl Pqmake {
             let deps = unique_words(depends[i].iter().map(String::as_str));
             self.write_archive(name, &packages[i], dir, group, &description, &deps)?;
         }
+        // A subpackage this build no longer produces must not stay next to
+        // the new main package (rebuild of the same version)
+        for group in super::KNOWN_GROUPS {
+            let pkgname = format!("{name}.{group}");
+            let stale = self.archive_path(name, &pkgname);
+            if !packages.contains(&pkgname) && stale.is_file() {
+                fs::remove_file(&stale).with_context(|| format!("unable to remove {}", stale.display()))?;
+                println!("  {} removed (no longer produced)", stale.display());
+            }
+        }
         self.index_dirty = true;
         Ok(())
     }
